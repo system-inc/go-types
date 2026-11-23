@@ -39,9 +39,12 @@ func (check *Checker) funcBody(decl *declInfo, name string, sig *Signature, body
 	}
 	check.indent = 0
 
-	// cohere's variational spike: a body run again, for other builds, starts from the signature's own scope.
+	// cohere's variational spike: a body run again, for other builds, runs in a scope of its own that starts from
+	// what the signature declared.
+	bodyScope := sig.scope
 	if check.variational != nil {
-		freshBodyScope(sig)
+		bodyScope = check.bodyScope(sig)
+		check.scope = bodyScope
 	}
 
 	check.stmtList(0, body.List)
@@ -56,7 +59,7 @@ func (check *Checker) funcBody(decl *declInfo, name string, sig *Signature, body
 
 	// spec: "Implementation restriction: A compiler may make it illegal to
 	// declare a variable inside a function body if the variable is never used."
-	check.usage(sig.scope)
+	check.usage(bodyScope)
 }
 
 func (check *Checker) usage(scope *Scope) {

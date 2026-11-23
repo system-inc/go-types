@@ -227,6 +227,15 @@ func (check *Checker) recordScope(node ast.Node, scope *Scope) {
 	assert(node != nil)
 	assert(scope != nil)
 	if m := check.Scopes; m != nil {
+		// cohere's variational spike: a variational check keeps each scope by build until it ends.
+		if check.variational != nil {
+			if scope.isFunc {
+				check.variational.info.functionNodes[scope] = node
+			}
+			builds, undoable := check.infoBuilds(node.Pos())
+			check.variational.info.scopes.record(node, scope, builds, check.variational.all, undoable)
+			return
+		}
 		m[node] = scope
 	}
 }

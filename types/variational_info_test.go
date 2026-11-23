@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/system-inc/go-types/canonical"
@@ -19,8 +20,9 @@ import (
 // file only some builds compile compares only as being in such a file, since a name declared in each build's own file
 // is one object for all of them, at its first declaration, and declarations alike across builds fold into one, as the
 // model has it (variational.go). Selections compare by kind, index, indirection and object, and instances by their
-// type arguments and type, and expressions' types and values as the census spells them. The variational check's
-// diagnostics, told apart, are every build's plain diagnostics.
+// type arguments and type, expressions' types and values as the census spells them, and scopes by the names they
+// declare and the object each name is. The variational check's diagnostics, told apart, are every build's plain
+// diagnostics.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
 	for name, fixtures := range map[string][]fixtureFile{
@@ -32,6 +34,7 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 		"alias targets":    aliasTargetFiles,
 		"generic types":    genericDefinitionFiles,
 		"kinds":            kindFiles,
+		"scopes":           scopeFiles,
 	} {
 		test.Run(name, func(test *testing.T) {
 			test.Parallel()
@@ -84,6 +87,8 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 					spellInstances(fileSet, project(info.Instances, overlays.Instances)),
 					spellInstances(fileSet, plain.Instances))
 				compareTypes(test, fileSet, label+" Types", project(info.Types, overlays.Types), plain.Types)
+				compareSpelled(test, label+" Scopes", spelling.scopes(project(info.Scopes, overlays.Scopes)),
+					spelling.scopes(plain.Scopes))
 			}
 			compareDiagnostics(test, published, plainDiagnostics)
 			// Every fixture's builds declare things in files of their own, so some answers differ from the host's.
@@ -123,6 +128,32 @@ func (WaitStatus) Signaled() bool { return true }
 `},
 }
 
+// scopeFiles split a body that declares a local in the function's own scope and another in a block, each of a type
+// that differs by build: each build's scopes hold its own locals, as its plain check's do, and the file scope of a
+// file only some builds compile is in those builds alone.
+var scopeFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+func Scoped() int {
+	width := Word(1)
+	if width > 0 {
+		inner := Word(2)
+		return int(inner)
+	}
+	return int(width)
+}
+`},
+	{"word_unix.go", buildDarwin | buildLinux, `package fork
+
+import "unsafe"
+
+type Word = uint64
+
+var _ = unsafe.Sizeof(0)
+`},
+	{"word_windows.go", buildWindows, "package fork\n\ntype Word = uint32\n"},
+}
+
 // fullInfo is an Info with every map that varies by build.
 func fullInfo() *types.Info {
 	return &types.Info{
@@ -132,6 +163,7 @@ func fullInfo() *types.Info {
 		Implicits:  map[ast.Node]types.Object{},
 		Selections: map[*ast.SelectorExpr]*types.Selection{},
 		Instances:  map[*ast.Ident]types.Instance{},
+		Scopes:     map[ast.Node]*types.Scope{},
 	}
 }
 
@@ -203,6 +235,19 @@ func (spelling objectSpelling) selections(selections map[*ast.SelectorExpr]*type
 	for node, selection := range selections {
 		spelled[nodeKey(spelling.fileSet, node)] = fmt.Sprintf("%d %v %t %s", selection.Kind(), selection.Index(),
 			selection.Indirect(), spelling.object(selection.Obj()))
+	}
+	return spelled
+}
+
+// scopes spells each scope by the names it declares and the object each name is.
+func (spelling objectSpelling) scopes(scopes map[ast.Node]*types.Scope) map[string]string {
+	spelled := make(map[string]string, len(scopes))
+	for node, scope := range scopes {
+		var names []string
+		for _, name := range scope.Names() {
+			names = append(names, name+": "+spelling.object(scope.Lookup(name)))
+		}
+		spelled[nodeKey(spelling.fileSet, node)] = strings.Join(names, "; ")
 	}
 	return spelled
 }

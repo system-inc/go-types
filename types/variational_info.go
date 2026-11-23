@@ -1,10 +1,10 @@
 // This file is cohere's, for the variational check (variational.go): the Info maps a caller gives a variational
-// check, answered by build: Types, Defs, Uses, Implicits, Selections and Instances. A caller that gives no Types map
-// has every expression's answers in Variation.Types instead. While the check runs, each answer is kept with the
-// builds it holds in, and undone with its unit when the unit restarts. When the check ends, the caller's maps get the
-// host's answers (build 0's), so a reader of the plain maps reads the host's plain check, and Variation.Overlays gets,
-// for each other build, only the answers in which that build differs from the host. go/types never reads these maps
-// back while it checks, so holding them aside until the end changes no answer.
+// check, answered by build: Types, Defs, Uses, Implicits, Selections, Instances and Scopes. A caller that gives no
+// Types map has every expression's answers in Variation.Types instead. While the check runs, each answer is kept with
+// the builds it holds in, and undone with its unit when the unit restarts. When the check ends, the caller's maps get
+// the host's answers (build 0's), so a reader of the plain maps reads the host's plain check, and Variation.Overlays
+// gets, for each other build, only the answers in which that build differs from the host. go/types never reads these
+// maps back while it checks, so holding them aside until the end changes no answer.
 
 package types
 
@@ -49,12 +49,13 @@ type BuildOverlays struct {
 	Implicits  Overlay[ast.Node, Object]
 	Selections Overlay[*ast.SelectorExpr, *Selection]
 	Instances  Overlay[*ast.Ident, Instance]
+	Scopes     Overlay[ast.Node, *Scope]
 }
 
 // Len is how many answers of every map the build has that differ from the host's.
 func (overlays *BuildOverlays) Len() int {
 	return overlays.Types.Len() + overlays.Defs.Len() + overlays.Uses.Len() + overlays.Implicits.Len() +
-		overlays.Selections.Len() + overlays.Instances.Len()
+		overlays.Selections.Len() + overlays.Instances.Len() + overlays.Scopes.Len()
 }
 
 // maskedAnswer is an answer, the builds it holds in, and the order it was written in (see check.recordOrder).
@@ -286,17 +287,21 @@ type infoLogs struct {
 	implicits  infoAnswers[ast.Node, Object]
 	selections infoAnswers[*ast.SelectorExpr, *Selection]
 	instances  infoAnswers[*ast.Ident, Instance]
+	scopes     infoAnswers[ast.Node, *Scope]
+	// functionNodes are the node each function's scope is recorded for, so a body that runs again records its own
+	// scope there (bodyScope).
+	functionNodes map[*Scope]ast.Node
 	// fileBuilds is the builds each file compiles in, for an answer written outside every unit, which holds where the
 	// file of its key compiles.
 	fileBuilds map[*token.File]Mask
 }
 
 // infoMarks are each log's undo length at a unit's start.
-type infoMarks [6]int
+type infoMarks [7]int
 
 func (logs *infoLogs) mark() infoMarks {
 	return infoMarks{len(logs.defs.undo), len(logs.uses.undo), len(logs.implicits.undo), len(logs.selections.undo),
-		len(logs.instances.undo), len(logs.types.undo)}
+		len(logs.instances.undo), len(logs.types.undo), len(logs.scopes.undo)}
 }
 
 func (logs *infoLogs) rollback(marks infoMarks) {
@@ -306,6 +311,7 @@ func (logs *infoLogs) rollback(marks infoMarks) {
 	logs.selections.rollback(marks[3])
 	logs.instances.rollback(marks[4])
 	logs.types.rollback(marks[5])
+	logs.scopes.rollback(marks[6])
 }
 
 // keep drops the undo entries after marks, so what they wrote stays whatever happens around them.
@@ -316,6 +322,7 @@ func (logs *infoLogs) keep(marks infoMarks) {
 	logs.selections.undo = logs.selections.undo[:marks[3]]
 	logs.instances.undo = logs.instances.undo[:marks[4]]
 	logs.types.undo = logs.types.undo[:marks[5]]
+	logs.scopes.undo = logs.scopes.undo[:marks[6]]
 }
 
 // infoBuilds is the builds an answer for a key at pos holds in, and whether to keep what it replaces: the current
@@ -341,6 +348,8 @@ func (check *Checker) startInfo() {
 	state.info.implicits.plain = check.Implicits
 	state.info.selections.plain = check.Selections
 	state.info.instances.plain = check.Instances
+	state.info.scopes.plain = check.Scopes
+	state.info.functionNodes = map[*Scope]ast.Node{}
 	state.info.fileBuilds = make(map[*token.File]Mask, len(state.variation.Files))
 	for file, builds := range state.variation.Files {
 		if tokenFile := check.fset.File(file.Pos()); tokenFile != nil {
@@ -386,6 +395,13 @@ func (check *Checker) endInfo() {
 		logs.instances.project(all, func(build int) *Overlay[*ast.Ident, Instance] {
 			return &variation.Overlays[build].Instances
 		}, sameInstance, nil)
+	}
+	// Each run of a unit makes its own scopes, which hold that run's objects, so a scope is the same answer only as
+	// itself: a build answered by another run's scope gets its own in its overlay.
+	if check.Scopes != nil {
+		logs.scopes.project(all, func(build int) *Overlay[ast.Node, *Scope] {
+			return &variation.Overlays[build].Scopes
+		}, func(left *Scope, right *Scope) bool { return left == right }, nil)
 	}
 	state.info = infoLogs{}
 }

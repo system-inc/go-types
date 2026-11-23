@@ -1308,14 +1308,16 @@ func (n *Named) resetForVariant() {
 	n.state_ = 0
 }
 
-// freshBodyScope puts sig's scope back to what the signature declared in it, when its body runs again: the receiver,
-// parameters, results and type parameters, and no child scope the last run opened.
-func freshBodyScope(sig *Signature) {
+// bodyScope is the scope sig's body runs in: sig's own scope the first time, and when the body runs again, for each
+// group of builds after a read split it, a scope of its own holding what the signature declared (the receiver,
+// parameters, results and type parameters) and no child scope another run opened. Each run's locals are then its own
+// run's, as each build's plain check has them, and the run's scope is recorded for the function's node in its builds.
+func (check *Checker) bodyScope(sig *Signature) *Scope {
 	scope := sig.scope
 	if !scope.bodyRan {
 		scope.bodyRan = true
 		scope.bodyChildren = len(scope.children)
-		return
+		return scope
 	}
 	own := map[Object]bool{}
 	if sig.recv != nil {
@@ -1333,12 +1335,18 @@ func freshBodyScope(sig *Signature) {
 			own[parameter.obj] = true
 		}
 	}
+	run := &Scope{parent: scope.parent, children: slices.Clone(scope.children[:scope.bodyChildren]),
+		number: scope.number, pos: scope.pos, end: scope.end, comment: scope.comment, isFunc: true, bodyRan: true,
+		bodyChildren: scope.bodyChildren}
 	for name, obj := range scope.elems {
-		if !own[resolve(name, obj)] {
-			delete(scope.elems, name)
+		if own[resolve(name, obj)] {
+			run.insert(name, obj)
 		}
 	}
-	scope.children = scope.children[:scope.bodyChildren]
+	if node, recorded := check.variational.info.functionNodes[scope]; recorded {
+		check.recordScope(node, run)
+	}
+	return run
 }
 
 // rewriteCommaOk is recordCommaOkTypes for a variational check: x's answer for the current unit's builds, and each
