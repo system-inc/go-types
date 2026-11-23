@@ -202,6 +202,10 @@ type objectVariation struct {
 	// methodIndices are a method's index among its named type's methods in each build, as each build's own declaration
 	// orders them, when the merging importer gives them (SetMethodIndex).
 	methodIndices []maskedIndex
+	// alternates are the objects of a package-level object's name, of other kinds, in builds it doesn't exist in, when
+	// the merging importer read them (SetAlternates). They are kept on the object rather than in its scope's
+	// alternates, since a merged package's scope is read by many checks at once while its other names are merged.
+	alternates []Object
 	// answered are a variable's answers in the builds where another variable's n:1 declaration typed it beside that
 	// one. The variable stays untyped until they cover every build that declares it, and when it has declarations of
 	// its own still to run (a name declared two at a time on unix and alone on windows), they run in the rest alone.
@@ -390,6 +394,23 @@ func methodIndexIn(method *Func, named *Named, build Mask) (int, bool) {
 func SetPresence(obj Object, builds Mask) {
 	base := obj.(interface{ base() *object }).base()
 	base.ensureVariation().presence = builds
+}
+
+// SetAlternates gives obj, a package-level object the merging importer read, the objects of its name declared as other
+// kinds in the builds obj doesn't exist in, each present in its own builds (SetPresence). A lookup of the name in
+// their builds finds them.
+func SetAlternates(obj Object, alternates []Object) {
+	base := obj.(interface{ base() *object }).base()
+	base.ensureVariation().alternates = alternates
+}
+
+// AlternatesOf is the objects of obj's name declared as other kinds in the builds obj doesn't exist in, which the
+// merging importer gave it, or nil.
+func AlternatesOf(obj Object) []Object {
+	if variation := variationOf(obj); variation != nil {
+		return variation.alternates
+	}
+	return nil
 }
 
 // UnderlyingVariant is one of a named type's underlying types, for the merging importer.
