@@ -26,6 +26,7 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 		"spike": fixtureFiles,
 		"hard":  hardFiles,
 		"usage": usageFiles,
+		"methods": methodOrderFiles,
 	} {
 		test.Run(name, func(test *testing.T) {
 			test.Parallel()
@@ -79,6 +80,34 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			test.Logf("overlay entries: linux %d, windows %d", variation.Overlays[1].Len(), variation.Overlays[2].Len())
 		})
 	}
+}
+
+// methodOrderFiles declare a type's methods in each build's own file, in a different order on windows, with one of
+// them on linux and darwin alone: a selection's method index is the method's place among its type's methods as each
+// build declares them, which the merged type's one list of methods doesn't give.
+var methodOrderFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+type WaitStatus uint32
+
+func Status(status WaitStatus) bool { return status.Signaled() && status.Stopped() }
+
+func Pointer(status *WaitStatus) bool { return status.Stopped() }
+`},
+	{"status_unix.go", buildLinux | buildDarwin, `package fork
+
+func (WaitStatus) Exited() bool { return false }
+
+func (WaitStatus) Signaled() bool { return true }
+
+func (WaitStatus) Stopped() bool { return false }
+`},
+	{"status_windows.go", buildWindows, `package fork
+
+func (WaitStatus) Stopped() bool { return false }
+
+func (WaitStatus) Signaled() bool { return true }
+`},
 }
 
 // fullInfo is an Info with every map that varies by build.

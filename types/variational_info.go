@@ -139,9 +139,15 @@ func (log *infoAnswers[K, V]) rollback(mark int) {
 
 // project gives plain the host's answers and each other build of all its overlay through overlayOf, comparing a
 // build's answer with the host's by same.
-func (log *infoAnswers[K, V]) project(plain map[K]V, all Mask, overlayOf func(build int) *Overlay[K, V], same func(V, V) bool) {
+// Each answer is first given as build has it by inBuild, when one is given.
+func (log *infoAnswers[K, V]) project(plain map[K]V, all Mask, overlayOf func(build int) *Overlay[K, V],
+	same func(V, V) bool, inBuild func(V, Mask) V,
+) {
 	for key, answers := range log.answers {
 		hostValue, hostHas := answers.at(1)
+		if hostHas && inBuild != nil {
+			hostValue = inBuild(hostValue, 1)
+		}
 		if hostHas {
 			plain[key] = hostValue
 		}
@@ -150,6 +156,9 @@ func (log *infoAnswers[K, V]) project(plain map[K]V, all Mask, overlayOf func(bu
 				continue
 			}
 			value, has := answers.at(1 << build)
+			if has && inBuild != nil {
+				value = inBuild(value, 1<<build)
+			}
 			switch {
 			case has && hostHas && same(value, hostValue):
 			case has:
@@ -233,27 +242,27 @@ func (check *Checker) endInfo() {
 	if check.Defs != nil {
 		logs.defs.project(check.Defs, all, func(build int) *Overlay[*ast.Ident, Object] {
 			return &variation.Overlays[build].Defs
-		}, sameObject)
+		}, sameObject, nil)
 	}
 	if check.Uses != nil {
 		logs.uses.project(check.Uses, all, func(build int) *Overlay[*ast.Ident, Object] {
 			return &variation.Overlays[build].Uses
-		}, sameObject)
+		}, sameObject, nil)
 	}
 	if check.Implicits != nil {
 		logs.implicits.project(check.Implicits, all, func(build int) *Overlay[ast.Node, Object] {
 			return &variation.Overlays[build].Implicits
-		}, sameObject)
+		}, sameObject, nil)
 	}
 	if check.Selections != nil {
 		logs.selections.project(check.Selections, all, func(build int) *Overlay[*ast.SelectorExpr, *Selection] {
 			return &variation.Overlays[build].Selections
-		}, sameSelection)
+		}, sameSelection, selectionInBuild)
 	}
 	if check.Instances != nil {
 		logs.instances.project(check.Instances, all, func(build int) *Overlay[*ast.Ident, Instance] {
 			return &variation.Overlays[build].Instances
-		}, sameInstance)
+		}, sameInstance, nil)
 	}
 	state.info = infoLogs{}
 }
@@ -263,6 +272,36 @@ func (check *Checker) endInfo() {
 func sameSelection(left *Selection, right *Selection) bool {
 	return left.kind == right.kind && left.obj == right.obj && left.indirect == right.indirect &&
 		slices.Equal(left.index, right.index) && Identical(left.recv, right.recv)
+}
+
+// selectionInBuild is selection as build has it: a method's index among its named type's methods counted as build's
+// own methods are, since the merged named type holds every build's methods in one list. The index of a field, or of an
+// interface's method, is the build's already, read under the unit's builds.
+func selectionInBuild(selection *Selection, build Mask) *Selection {
+	method, isMethod := selection.obj.(*Func)
+	if !isMethod || selection.kind == FieldVal || len(selection.index) == 0 {
+		return selection
+	}
+	receiver := method.Signature().Recv()
+	if receiver == nil {
+		return selection
+	}
+	receiverType := Unalias(receiver.Type())
+	if pointer, isPointer := receiverType.(*Pointer); isPointer {
+		receiverType = Unalias(pointer.Elem())
+	}
+	named, isNamed := receiverType.(*Named)
+	if !isNamed {
+		return selection
+	}
+	index, found := methodIndexIn(method.Origin(), named, build)
+	last := len(selection.index) - 1
+	if !found || selection.index[last] == index {
+		return selection
+	}
+	inBuild := *selection
+	inBuild.index = append(slices.Clone(selection.index[:last]), index)
+	return &inBuild
 }
 
 // sameInstance reports whether two instances answer alike: identical type arguments and an identical type.

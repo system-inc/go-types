@@ -199,6 +199,9 @@ type objectVariation struct {
 	variants []objectVariant // its answers by build once declared; nil while one answer holds everywhere
 	decls    []declVariant   // a source object declared in more than one file: each declaration and its builds
 	named    *Named          // a type name's one named type, kept across its declarations
+	// methodIndices are a method's index among its named type's methods in each build, as each build's own declaration
+	// orders them, when the merging importer gives them (SetMethodIndex).
+	methodIndices []maskedIndex
 }
 
 type objectVariant struct {
@@ -272,6 +275,106 @@ func SetVariants(obj Object, variants []Variant) {
 	if len(collapsed) > 1 {
 		base.ensureVariation().variants = collapsed
 	}
+}
+
+// maskedIndex is an index and the builds it holds in.
+type maskedIndex struct {
+	builds Mask
+	index  int
+}
+
+// SetMethodIndex says method is at index among its named type's methods in builds, as those builds' own export data
+// orders them: for the merging importer, whose merged named type holds every build's methods in one list.
+func SetMethodIndex(method *Func, builds Mask, index int) {
+	variation := method.ensureVariation()
+	variation.methodIndices = append(variation.methodIndices, maskedIndex{builds, index})
+}
+
+// methodDeclarations are each base type's method declarations in source order, with the builds each holds in, for a
+// variational check: a merged method's declarations are one method, so each build's index among its type's methods is
+// counted from them, as each build's plain check counts.
+type methodDeclarations struct {
+	bases []*TypeName
+	byBase map[*TypeName][]declaredMethod
+}
+
+type declaredMethod struct {
+	method *Func
+	builds Mask
+}
+
+// note adds method, declared for base, before it may be merged into another of its name.
+func (declared *methodDeclarations) note(check *Checker, base *TypeName, method *Func) {
+	if check.variational == nil {
+		return
+	}
+	if declared.byBase == nil {
+		declared.byBase = map[*TypeName][]declaredMethod{}
+	}
+	if _, seen := declared.byBase[base]; !seen {
+		declared.bases = append(declared.bases, base)
+	}
+	builds := check.variational.all
+	if d := check.objMap[method]; d != nil && d.mask != 0 {
+		builds = d.mask
+	}
+	declared.byBase[base] = append(declared.byBase[base], declaredMethod{method, builds})
+}
+
+// setIndices gives each method of a base type whose methods differ by build its index in each build, counted over
+// the declarations that build compiles. A type whose every method holds in every build needs none: its methods' order
+// is every build's.
+func (declared *methodDeclarations) setIndices(check *Checker) {
+	for _, base := range declared.bases {
+		methods := declared.byBase[base]
+		differs := false
+		for _, each := range methods {
+			differs = differs || each.builds != check.variational.all
+		}
+		if !differs {
+			continue
+		}
+		var counts [8]int
+		for _, each := range methods {
+			// A declaration merged into an earlier one of its name answers as that one.
+			target := each.method
+			for _, kept := range check.methods[base] {
+				if kept.name == each.method.name {
+					target = kept
+					break
+				}
+			}
+			for build := range 8 {
+				if each.builds&(1<<build) != 0 {
+					SetMethodIndex(target, 1<<build, counts[build])
+					counts[build]++
+				}
+			}
+		}
+	}
+}
+
+// methodIndexIn is method's index among named's methods in build: the index the merging importer gave for build, or
+// else its place among the methods present in build, since a package's methods are declared in its files' order in
+// every build.
+func methodIndexIn(method *Func, named *Named, build Mask) (int, bool) {
+	if variation := method.variation; variation != nil {
+		for _, given := range variation.methodIndices {
+			if given.builds&build != 0 {
+				return given.index, true
+			}
+		}
+	}
+	index := 0
+	for _, candidate := range named.Origin().methods {
+		if candidate == method {
+			return index, true
+		}
+		if variation := candidate.variation; variation == nil || variation.presence == 0 || variation.presence&build != 0 {
+			index++
+		}
+	}
+	return 0, false
 }
 
 // SetPresence says obj exists only in builds.

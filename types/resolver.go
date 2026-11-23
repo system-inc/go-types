@@ -505,6 +505,7 @@ func (check *Checker) collectObjects() {
 	}
 
 	check.methods = make(map[*TypeName][]*Func)
+	var declared methodDeclarations
 	for i := range methods {
 		m := &methods[i]
 		// Determine the receiver base type and associate m with it.
@@ -512,13 +513,15 @@ func (check *Checker) collectObjects() {
 		if base != nil {
 			m.obj.hasPtrRecv_ = ptr
 			// cohere's variational spike: a method declared again in another build's file is one method with a
-			// declaration for each.
+			// declaration for each, and each build's index among its type's methods is noted.
+			declared.note(check, base, m.obj)
 			if check.mergeMethodVariant(check.methods[base], m.obj) {
 				continue
 			}
 			check.methods[base] = append(check.methods[base], m.obj)
 		}
 	}
+	declared.setIndices(check)
 }
 
 // sortObjects sorts package-level objects by source-order for reproducible processing
