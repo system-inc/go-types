@@ -197,10 +197,10 @@ func computeInterfaceTypeSet(check *Checker, pos token.Pos, ityp *Interface) *_T
 	// cohere's variational spike: a type set abandoned by a split, or computed from answers that differ by build,
 	// keeps no memo, so the next read computes it for its own builds.
 	completed := false
-	if variational.active {
-		narrowedBefore := variational.narrowed
+	if state := check.readState(); state != nil {
+		narrowedBefore := state.narrowed
 		defer func() {
-			if !completed || variational.narrowed != narrowedBefore {
+			if !completed || state.narrowed != narrowedBefore {
 				ityp.tset = nil
 			}
 		}()
@@ -394,11 +394,11 @@ func computeUnionTypeSet(check *Checker, unionSets map[*Union]*_TypeSet, pos tok
 	unionSets[utyp] = new(_TypeSet)
 
 	// cohere's variational spike: as in computeInterfaceTypeSet, an abandoned or narrowed type set keeps no memo.
-	if variational.active {
-		narrowedBefore := variational.narrowed
+	if state := check.readState(); state != nil {
+		narrowedBefore := state.narrowed
 		completed := false
 		defer func() {
-			if !completed || variational.narrowed != narrowedBefore {
+			if !completed || state.narrowed != narrowedBefore {
 				delete(unionSets, utyp)
 			}
 		}()

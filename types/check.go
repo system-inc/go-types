@@ -164,7 +164,8 @@ type Checker struct {
 	cleaners   []cleaner             // list of types that may need a final cleanup at the end of type-checking
 
 	// cohere's variational spike
-	vundo       []vundo    // what each answer write replaced while a unit that could restart runs
+	variational *variationalState // the variational check's state, or nil for a plain check
+	vundo       []vundo           // what each answer write replaced while a unit that could restart runs
 	untypedLog  []ast.Expr // untyped expressions in the order remembered, so a unit can flush or drop its own
 	recordOrder int64      // the iota of the constant being declared, or -1 (see vrecord.order)
 
@@ -195,7 +196,7 @@ func (check *Checker) rememberUntyped(e ast.Expr, lhs bool, mode operandMode, ty
 		m = make(map[ast.Expr]exprInfo)
 		check.untyped = m
 	}
-	if _, remembered := m[e]; !remembered && variational.active {
+	if _, remembered := m[e]; !remembered && check.variational != nil {
 		check.untypedLog = append(check.untypedLog, e)
 	}
 	m[e] = exprInfo{lhs, mode, typ, val}
@@ -208,10 +209,10 @@ func (check *Checker) rememberUntyped(e ast.Expr, lhs bool, mode operandMode, ty
 // later returns the pushed action so one can provide a description
 // via action.describef for debugging, if desired.
 func (check *Checker) later(f func()) *action {
-	if variational.active {
+	if check.variational != nil {
 		// A delayed action is a unit: it runs under the builds that were current when it was pushed, and again for
 		// each group of them when a read inside splits it.
-		builds := variational.mask
+		builds := check.variational.mask
 		plain := f
 		f = func() { check.runUnit(builds, plain, false) }
 	}
