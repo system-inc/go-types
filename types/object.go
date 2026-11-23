@@ -272,7 +272,9 @@ func NewTypeName(pos token.Pos, pkg *Package, name string, typ Type) *TypeName {
 
 // NewTypeNameLazy returns a new defined type like NewTypeName, but it
 // lazily calls unpack to finish constructing the Named object.
-func _NewTypeNameLazy(pos token.Pos, pkg *Package, name string, load func(*Named) ([]*TypeParam, Type, []*Func, []func())) *TypeName {
+// (cohere's: exported, as types2 exports it, for an importer that reads a
+// named type's underlying type and methods the first time they are needed.)
+func NewTypeNameLazy(pos token.Pos, pkg *Package, name string, load func(*Named) ([]*TypeParam, Type, []*Func, []func())) *TypeName {
 	obj := NewTypeName(pos, pkg, name, nil)
 	n := (*Checker)(nil).newNamed(obj, nil, nil)
 	n.loader = load
