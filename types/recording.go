@@ -143,6 +143,14 @@ func (check *Checker) recordInstance(expr ast.Expr, targs []Type, typ Type) {
 	assert(ident != nil)
 	assert(typ != nil)
 	if m := check.Instances; m != nil {
+		// cohere's variational spike: a variational check keeps the instance by build until it ends.
+		if check.variational != nil {
+			m = map[*ast.Ident]Instance{}
+			defer func() {
+				builds, undoable := check.infoBuilds(ident.Pos())
+				check.variational.info.instances.record(ident, m[ident], builds, undoable)
+			}()
+		}
 		// If this is an instance of a method value/expression, replace the
 		// receiver for the Signature stored in Instances (go.dev/issue/79657).
 		if sig, _ := typ.(*Signature); sig != nil && sig.recvold != nil {
@@ -167,6 +175,12 @@ func (check *Checker) recordInstance(expr ast.Expr, targs []Type, typ Type) {
 func (check *Checker) recordDef(id *ast.Ident, obj Object) {
 	assert(id != nil)
 	if m := check.Defs; m != nil {
+		// cohere's variational spike: a variational check keeps each Info answer by build until it ends.
+		if check.variational != nil {
+			builds, undoable := check.infoBuilds(id.Pos())
+			check.variational.info.defs.record(id, obj, builds, undoable)
+			return
+		}
 		m[id] = obj
 	}
 }
@@ -175,6 +189,11 @@ func (check *Checker) recordUse(id *ast.Ident, obj Object) {
 	assert(id != nil)
 	assert(obj != nil)
 	if m := check.Uses; m != nil {
+		if check.variational != nil {
+			builds, undoable := check.infoBuilds(id.Pos())
+			check.variational.info.uses.record(id, obj, builds, undoable)
+			return
+		}
 		m[id] = obj
 	}
 }
@@ -183,6 +202,11 @@ func (check *Checker) recordImplicit(node ast.Node, obj Object) {
 	assert(node != nil)
 	assert(obj != nil)
 	if m := check.Implicits; m != nil {
+		if check.variational != nil {
+			builds, undoable := check.infoBuilds(node.Pos())
+			check.variational.info.implicits.record(node, obj, builds, undoable)
+			return
+		}
 		m[node] = obj
 	}
 }
@@ -191,6 +215,11 @@ func (check *Checker) recordSelection(x *ast.SelectorExpr, kind SelectionKind, r
 	assert(obj != nil && (recv == nil || len(index) > 0))
 	check.recordUse(x.Sel, obj)
 	if m := check.Selections; m != nil {
+		if check.variational != nil {
+			builds, undoable := check.infoBuilds(x.Pos())
+			check.variational.info.selections.record(x, &Selection{kind, recv, obj, index, indirect}, builds, undoable)
+			return
+		}
 		m[x] = &Selection{kind, recv, obj, index, indirect}
 	}
 }

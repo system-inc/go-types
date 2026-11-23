@@ -41,6 +41,9 @@ type Variation struct {
 	Builds Mask
 	Files  map[*ast.File]Mask
 	Types  map[ast.Expr]Answers
+	// Overlays are, for each build b other than the host (build 0), the answers of the Info maps the check was given
+	// in which b differs from the host. The maps themselves hold the host's answers (variational_info.go).
+	Overlays []BuildOverlays
 
 	// Counts of the check's work, for the spike's report.
 	Units    int // units run to their end
@@ -147,6 +150,7 @@ type variationalState struct {
 	depth     int    // how many units are running; a read outside every unit never splits
 	narrowed  uint64 // how many reads have answered for the current unit's builds alone
 	variation *Variation
+	info      infoLogs // the Info maps' answers by build until the check ends (variational_info.go)
 	// outer is the check this goroutine was running when this one began, put back when this one ends: an importer
 	// may check a package from source in the middle of another check.
 	outer *variationalState
@@ -580,6 +584,7 @@ func (check *Checker) runUnit(builds Mask, run func(), declaration bool) {
 func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split []Mask) {
 	savedMask := check.variational.mask
 	savedUndo := len(check.vundo)
+	savedInfo := check.variational.info.mark()
 	savedDelayed := len(check.delayed)
 	savedUntyped := len(check.untypedLog)
 	savedPositions := len(check.posStack)
@@ -608,6 +613,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 			}
 		}
 		check.vundo = check.vundo[:savedUndo]
+		check.variational.info.rollback(savedInfo)
 		for index := savedDelayed; index < len(check.delayed); index++ {
 			if !check.delayed[index].persistent {
 				check.delayed[index].f = func() {}
@@ -630,6 +636,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 	// A finished declaration's answers stay whatever happens around it, and nothing undoes a unit no other holds.
 	if declaration || check.variational.depth == 1 {
 		check.vundo = check.vundo[:savedUndo]
+		check.variational.info.keep(savedInfo)
 	}
 	if declaration {
 		for index := savedDelayed; index < len(check.delayed); index++ {
@@ -690,6 +697,7 @@ func (check *Checker) startVariational() bool {
 	}
 	checksByGoroutine.Store(goroutine, check.variational)
 	runningChecks.Add(1)
+	check.startInfo()
 	check.recordOrder = -1
 	return true
 }
@@ -697,6 +705,7 @@ func (check *Checker) startVariational() bool {
 // endVariational ends the check. Its answers are already in the variation, written as they came.
 func (check *Checker) endVariational() {
 	check.vundo = nil
+	check.endInfo()
 	goroutine := goroutineIdentity()
 	if outer := check.variational.outer; outer != nil {
 		checksByGoroutine.Store(goroutine, outer)
