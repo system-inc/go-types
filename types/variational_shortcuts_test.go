@@ -221,3 +221,38 @@ func TestVariationalReportsANameRedeclaredInABuildItsMergedDeclarationsCover(t *
 		t.Error("the variational check reported nothing, and linux's plain check reports Value redeclared")
 	}
 }
+
+// fieldMethodFiles declare a struct with a field F on darwin and linux, and on windows a struct without it and a
+// method F, as std's os declares fileStat's mode: no build has both, so none reports a clash. Linux alone declares the
+// method F too, in a file of its own, and its plain check reports the field and method clash, at linux's method.
+var fieldMethodFiles = []fixtureFile{
+	{"shared.go", everyBuild, "package fork\n\nfunc Size(stat Stat) int { return len(stat.name()) }\n"},
+	{"types_unix.go", buildDarwin | buildLinux, `package fork
+
+type Stat struct{ F int }
+
+func (Stat) name() string { return "unix" }
+`},
+	{"types_windows.go", buildWindows, `package fork
+
+type Stat struct{ path string }
+
+func (Stat) name() string { return "windows" }
+
+func (stat Stat) F() string { return stat.path }
+`},
+	{"clash_linux.go", buildLinux, `package fork
+
+func (Stat) F() int { return 1 }
+`},
+}
+
+// TestVariationalComparesEachBuildsFieldsWithItsOwnMethods is the projection test over fieldMethodFiles with
+// diagnostics: the clash is linux's alone, reported once, at linux's method.
+func TestVariationalComparesEachBuildsFieldsWithItsOwnMethods(t *testing.T) {
+	t.Parallel()
+	_, published := projectAndCompareWithDiagnostics(t, fieldMethodFiles, true)
+	if len(published) == 0 {
+		t.Error("the variational check reported nothing, and linux's plain check reports F's field and method clash")
+	}
+}

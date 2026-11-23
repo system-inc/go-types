@@ -962,6 +962,28 @@ func sameAnswer(left objectVariant, right objectVariant) bool {
 	return left.val == nil || left.val.Kind() == right.val.Kind() && left.val.ExactString() == right.val.ExactString()
 }
 
+// declaredHere is where method is declared in the current unit's builds: a method declared again in other builds'
+// files is one method, at its first declaration, and each build's plain check has it at that build's own. A unit
+// whose builds compile more than one of its declarations splits, one group for each.
+func (check *Checker) declaredHere(method *Func) positioner {
+	if check.variational == nil || method.variation == nil || len(method.variation.decls) == 0 {
+		return method
+	}
+	state := check.variational
+	var parts []Mask
+	var declared positioner = method
+	for _, each := range method.variation.decls {
+		if builds := each.mask & state.mask; builds != 0 && each.decl.fdecl != nil {
+			parts = append(parts, builds)
+			declared = atPos(each.decl.fdecl.Name.Pos())
+		}
+	}
+	if len(parts) > 1 && state.depth > 0 {
+		splitAt(state, parts)
+	}
+	return declared
+}
+
 // passSplit raises recovered again when it is a split, for a deferred guard that recovers a panic before asserting
 // what upstream's code computed (Alignof's result): a split isn't a failure, and its unit runs again.
 func passSplit(recovered any) {

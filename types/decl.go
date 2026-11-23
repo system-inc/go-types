@@ -753,6 +753,11 @@ func (check *Checker) checkFieldUniqueness(base *Named) {
 		for i := 0; i < base.NumMethods(); i++ {
 			m := base.Method(i)
 			assert(m.name != "_")
+			// cohere's variational spike: a method absent from the unit's builds is no clash, and one present in
+			// only some of them splits the unit.
+			if !presentHere(variationOf(m)) {
+				continue
+			}
 			assert(mset.insert(m) == nil)
 		}
 
@@ -768,7 +773,8 @@ func (check *Checker) checkFieldUniqueness(base *Named) {
 					// For historical consistency, we report the primary error on the
 					// method, and the alt decl on the field.
 					err := check.newError(DuplicateFieldAndMethod)
-					err.addf(alt, "field and method with the same name %s", fld.name)
+					// cohere's variational spike: at the method's declaration in the unit's builds.
+					err.addf(check.declaredHere(alt.(*Func)), "field and method with the same name %s", fld.name)
 					err.addAltDecl(fld)
 					err.report()
 				}
