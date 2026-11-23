@@ -329,8 +329,13 @@ func splitAt(parts []Mask) {
 
 // Outside runs work as if no unit were running, so no read inside it splits: for the merging importer, which resolves
 // an imported object the first time a unit reads it, and would be left half done by a split's panic. A unit that reads
-// the object afterwards answers for its own builds as always.
+// the object afterwards answers for its own builds as always. Outside every unit it writes nothing, so goroutines
+// that resolve imported objects while no check runs share no write.
 func Outside(work func()) {
+	if variational.depth == 0 {
+		work()
+		return
+	}
 	savedDepth := variational.depth
 	variational.depth = 0
 	defer func() { variational.depth = savedDepth }()
