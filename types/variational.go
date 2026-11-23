@@ -21,6 +21,7 @@ import (
 	"go/constant"
 	"iter"
 	"math/bits"
+	"slices"
 )
 
 // Mask is a set of builds, bit b for build b. The spike holds at most eight.
@@ -340,6 +341,21 @@ func Outside(work func()) {
 	variational.depth = 0
 	defer func() { variational.depth = savedDepth }()
 	work()
+}
+
+// CompleteWithMethods completes iface, read from one build's export data, with methods as its type set: for the
+// merging importer, whose interface embeds merged interfaces whose methods differ by build, so computing its type set
+// now, outside every unit, would read them as another build declares them. methods are every method of iface's type
+// set in the build it was read from, its explicit ones among them, and the type set holds every type, as a method
+// set's does. An interface whose type set is computed already is left as it is.
+func CompleteWithMethods(iface *Interface, methods []*Func) {
+	if iface.tset != nil {
+		return
+	}
+	sorted := slices.Clone(methods)
+	sortMethods(sorted)
+	iface.complete = true
+	iface.tset = &_TypeSet{methods: sorted, terms: allTermlist}
 }
 
 // readingVariation reports whether a read must answer by build: a variational check is in a unit.
