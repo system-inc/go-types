@@ -52,7 +52,14 @@ type StdSizes struct {
 
 func (s *StdSizes) Alignof(T Type) (result int64) {
 	defer func() {
+		// cohere's variational spike: a split raised inside the size computation is passed on, for its unit to run
+		// again for each group of builds; any other panic meets the assertion as it did.
+		recovered := recover()
+		passSplit(recovered)
 		assert(result >= 1)
+		if recovered != nil {
+			panic(recovered)
+		}
 	}()
 
 	// For arrays and structs, alignment is defined in terms

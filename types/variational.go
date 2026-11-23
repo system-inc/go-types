@@ -962,6 +962,14 @@ func sameAnswer(left objectVariant, right objectVariant) bool {
 	return left.val == nil || left.val.Kind() == right.val.Kind() && left.val.ExactString() == right.val.ExactString()
 }
 
+// passSplit raises recovered again when it is a split, for a deferred guard that recovers a panic before asserting
+// what upstream's code computed (Alignof's result): a split isn't a failure, and its unit runs again.
+func passSplit(recovered any) {
+	if request, isSplit := recovered.(splitRequest); isSplit {
+		panic(request)
+	}
+}
+
 // splitAt raises a split of state's current unit's builds into parts, plus whatever of them no part holds.
 func splitAt(state *variationalState, parts []Mask) {
 	covered := Mask(0)

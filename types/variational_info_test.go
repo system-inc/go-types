@@ -26,6 +26,7 @@ var projectionFixtures = map[string][]fixtureFile{
 	"init order":       initOrderFiles,
 	"imports":          importFiles,
 	"interfaces":       interfaceFiles,
+	"sizes":            sizeFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
