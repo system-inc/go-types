@@ -29,6 +29,12 @@ it is a commit of one concern.
 - `types` checks a package once for every build at once (`types/variational.go` says how). A package-level object
   keeps one identity across builds and only its properties vary by build. A unit of work runs under the builds it
   holds in, and runs again for each group of builds whose reads differ.
+- `types` runs many variational checks at once, each by its own Checker on its own goroutine. Each check holds its own
+  state, and the reads that never see a Checker (`Named.Underlying`, `Object.Type`, `Const.Val`, `Scope.Lookup`, a
+  method's presence, a type set's memo) find it by the goroutine they run on, read from the runtime's g register or
+  thread-local slot by two instructions of assembly (`types/goroutine_amd64.s`, `types/goroutine_arm64.s`), which
+  depend on no field of the runtime and need nothing from one Go release to the next. Other architectures read the
+  goroutine's id from its stack trace (`types/goroutine_other.go`).
 - `gcimporter` reads each object of a package's export data the first time it is looked up, and a named type's
   declaration (its type parameters, underlying type and methods) the first time any of it is needed, through
   `types.NewTypeNameLazy`, which `types` exports as types2 does.
