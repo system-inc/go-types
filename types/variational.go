@@ -398,7 +398,8 @@ func SetPresence(obj Object, builds Mask) {
 
 // SetAlternates gives obj, a package-level object the merging importer read, the objects of its name declared as other
 // kinds in the builds obj doesn't exist in, each present in its own builds (SetPresence). A lookup of the name in
-// their builds finds them.
+// their builds finds them. It is the importer's twin of the checker's Scope.alternates, kept on the object because a
+// merged package's scope is read by many checks at once while its other names are merged.
 func SetAlternates(obj Object, alternates []Object) {
 	base := obj.(interface{ base() *object }).base()
 	base.ensureVariation().alternates = alternates

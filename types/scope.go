@@ -83,13 +83,15 @@ func (s *Scope) Lookup(name string) Object {
 	if obj != nil && runningChecks.Load() > 0 {
 		// cohere's variational spike: an object that exists in only some builds is found in those alone, and another
 		// of the same name may stand in the rest.
-		if !presentHere(variationOf(obj)) {
+		// The importer's alternates are on the object, read from the variation presentHere read (never nil when the
+		// object is absent), so an object with none costs nothing more.
+		if variation := variationOf(obj); !presentHere(variation) {
 			for _, alternate := range s.alternates[name] {
 				if presentHere(variationOf(alternate)) {
 					return alternate
 				}
 			}
-			for _, alternate := range AlternatesOf(obj) {
+			for _, alternate := range variation.alternates {
 				if presentHere(variationOf(alternate)) {
 					return alternate
 				}
