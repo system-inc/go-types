@@ -719,11 +719,18 @@ func (obj *object) base() *object { return obj }
 func (obj *object) ensureVariation() *objectVariation {
 	if obj.variation == nil {
 		obj.variation = &objectVariation{}
-		if !variationsExist.Load() {
-			variationsExist.Store(true)
-		}
+		noteVariationsExist()
 	}
 	return obj.variation
+}
+
+// noteVariationsExist sets variationsExist, for each place that makes a variation: an object's (ensureVariation) and
+// a named type's underlying types by build the merging importer gives (SetUnderlyingVariants), which may be all that
+// differs by build in a process.
+func noteVariationsExist() {
+	if !variationsExist.Load() {
+		variationsExist.Store(true)
+	}
 }
 
 // Variant is one answer of an imported object, for the importer that merges each build's export data.
@@ -939,6 +946,7 @@ func SetUnderlyingVariants(n *Named, variants []UnderlyingVariant) {
 			}
 		}
 		n.variation = &namedVariation{variants: kept}
+		noteVariationsExist()
 	}
 }
 
