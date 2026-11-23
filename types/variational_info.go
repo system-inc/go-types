@@ -433,20 +433,14 @@ type methodRemaps struct {
 	byNamed map[*Named]bool
 }
 
-// differs reports whether named's methods can sit elsewhere in some build: a method is absent from some build, or the
-// merging importer gave its indices by build.
+// differs reports whether named's methods can sit elsewhere in some build (methodsDifferByBuild).
 func (remaps *methodRemaps) differs(named *Named) bool {
 	if remaps.byNamed == nil {
 		remaps.byNamed = map[*Named]bool{}
 	}
 	differs, known := remaps.byNamed[named]
 	if !known {
-		for _, method := range named.methods {
-			if variation := method.variation; variation != nil && (variation.presence != 0 || len(variation.methodIndices) > 0) {
-				differs = true
-				break
-			}
-		}
+		differs = methodsDifferByBuild(named)
 		remaps.byNamed[named] = differs
 	}
 	return differs

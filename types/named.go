@@ -9,6 +9,7 @@ package types
 
 import (
 	"go/token"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -423,6 +424,10 @@ func (t *Named) TypeArgs() *TypeList {
 
 // NumMethods returns the number of explicit methods defined for t.
 func (t *Named) NumMethods() int {
+	// cohere's variational spike: read as one build, the methods are the build's own.
+	if order, inBuild := t.methodsInBuild(); inBuild {
+		return len(order)
+	}
 	return len(t.Origin().unpack().methods)
 }
 
@@ -442,6 +447,15 @@ func (t *Named) NumMethods() int {
 // But the specific ordering is not specified and must not be relied on as it may
 // change in the future.
 func (t *Named) Method(i int) *Func {
+	// cohere's variational spike: read as one build, i counts the build's own methods in its order.
+	if order, inBuild := t.methodsInBuild(); inBuild {
+		i = order[i]
+	}
+	return t.methodAt(i)
+}
+
+// methodAt is the i'th method of t among every build's methods (cohere's variational spike: Method's own body).
+func (t *Named) methodAt(i int) *Func {
 	t.unpack()
 
 	if t.stateHas(hasMethods) {
@@ -481,7 +495,7 @@ func (t *Named) Method(i int) *Func {
 func (t *Named) expandMethod(i int) *Func {
 	// t.orig.methods is not lazy. orig is the declared function on t, which
 	// must have receiver type parameters (since t is generic).
-	orig := t.inst.orig.Method(i)
+	orig := t.inst.orig.methodAt(i) // cohere's variational spike: i counts every build's methods
 	assert(orig != nil)
 
 	check := t.check
@@ -737,6 +751,10 @@ func (n *Named) lookupMethod(pkg *Package, name string, foldCase bool) (int, *Fu
 			// cohere's variational spike: a method declared in only some builds is found in those alone.
 			if !presentHere(variationOf(n.Origin().methods[i])) {
 				return -1, nil
+			}
+			// Read as one build, the index is the method's among the build's own methods, which Method counts.
+			if order, inBuild := n.methodsInBuild(); inBuild {
+				i = slices.Index(order, i)
 			}
 			// For instances, m.Method(i) will be different from the orig method.
 			return i, n.Method(i)

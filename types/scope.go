@@ -56,7 +56,13 @@ func NewScope(parent *Scope, pos, end token.Pos, comment string) *Scope {
 func (s *Scope) Parent() *Scope { return s.parent }
 
 // Len returns the number of scope elements.
-func (s *Scope) Len() int { return len(s.elems) }
+func (s *Scope) Len() int {
+	// cohere's variational spike: read as one build, a name absent from the build is no element.
+	if inBuildState() != nil {
+		return len(s.Names())
+	}
+	return len(s.elems)
+}
 
 // Names returns the scope's element names in sorted order.
 func (s *Scope) Names() []string {
@@ -67,6 +73,10 @@ func (s *Scope) Names() []string {
 		i++
 	}
 	slices.Sort(names)
+	// cohere's variational spike: read as one build, a name absent from the build is left out.
+	if inBuildState() != nil {
+		names = slices.DeleteFunc(names, func(name string) bool { return s.Lookup(name) == nil })
+	}
 	return names
 }
 

@@ -12,6 +12,19 @@ import (
 	"github.com/system-inc/go-types/types"
 )
 
+// projectionFixtures are the fixtures whose projection to each build is compared with that build's plain check.
+var projectionFixtures = map[string][]fixtureFile{
+	"spike":            fixtureFiles,
+	"hard":             hardFiles,
+	"usage":            usageFiles,
+	"methods":          methodOrderFiles,
+	"abandoned errors": abandonedErrorFiles,
+	"alias targets":    aliasTargetFiles,
+	"generic types":    genericDefinitionFiles,
+	"kinds":            kindFiles,
+	"scopes":           scopeFiles,
+}
+
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
 // each build's projection of them (the plain maps, which hold the host's answers, with that build's overlay laid over
 // them) to be that build's plain check's maps, entry for entry. Objects compare by kind, name, their type in the build
@@ -25,17 +38,7 @@ import (
 // build's plain diagnostics.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
-	for name, fixtures := range map[string][]fixtureFile{
-		"spike":            fixtureFiles,
-		"hard":             hardFiles,
-		"usage":            usageFiles,
-		"methods":          methodOrderFiles,
-		"abandoned errors": abandonedErrorFiles,
-		"alias targets":    aliasTargetFiles,
-		"generic types":    genericDefinitionFiles,
-		"kinds":            kindFiles,
-		"scopes":           scopeFiles,
-	} {
+	for name, fixtures := range projectionFixtures {
 		test.Run(name, func(test *testing.T) {
 			test.Parallel()
 			fileSet := token.NewFileSet()
