@@ -28,6 +28,7 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 		"usage":            usageFiles,
 		"methods":          methodOrderFiles,
 		"abandoned errors": abandonedErrorFiles,
+		"alias targets":    aliasTargetFiles,
 	} {
 		test.Run(name, func(test *testing.T) {
 			test.Parallel()

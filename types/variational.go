@@ -903,7 +903,7 @@ func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) in
 	if held&d.mask != 0 {
 		return variantNew
 	}
-	if variantKind(first) != variantKind(obj) {
+	if variantKind(first, firstDecl) != variantKind(obj, d) {
 		base.ensureVariation().presence = d.mask
 		if check.pkg.scope.alternates == nil {
 			check.pkg.scope.alternates = map[string][]Object{}
@@ -959,6 +959,84 @@ func (check *Checker) mergeMethodVariant(methods []*Func, method *Func) bool {
 	return false
 }
 
+// methodReceiver is a method and the base type its receiver names, through a pointer when ptr.
+type methodReceiver struct {
+	method *Func
+	ptr    bool
+	base   *TypeName
+}
+
+// methodReceivers resolves method's receiver, named by recv, to its base type. A receiver named through an alias
+// whose target differs by build names a different base type in different builds, and a method of each base type is a
+// method of its own, as each build's plain check and each build's export data have it, so each base after the first
+// gets a method object of its own, declared in the builds that name that base. nextOrder is the last order given to
+// an object, and each new method is given the next.
+func (check *Checker) methodReceivers(method *Func, ptr bool, recv *ast.Ident, nextOrder *uint32) []methodReceiver {
+	if check.variational == nil {
+		resolvedPointer, base := check.resolveBaseTypeName(ptr, recv, 0)
+		return []methodReceiver{{method, resolvedPointer, base}}
+	}
+	declaration := check.objMap[method]
+	var receivers []methodReceiver
+	var builds []Mask
+	for build := Mask(1); build != 0; build <<= 1 {
+		if build&declaration.mask == 0 {
+			continue
+		}
+		resolvedPointer, base := check.resolveBaseTypeName(ptr, recv, build)
+		index := slices.IndexFunc(receivers, func(receiver methodReceiver) bool {
+			return receiver.ptr == resolvedPointer && receiver.base == base
+		})
+		if index < 0 {
+			receivers = append(receivers, methodReceiver{method, resolvedPointer, base})
+			builds = append(builds, 0)
+			index = len(receivers) - 1
+		}
+		builds[index] |= build
+	}
+	if len(receivers) <= 1 {
+		return receivers
+	}
+	for index := range receivers {
+		narrowed := *declaration
+		narrowed.mask = builds[index]
+		if index > 0 {
+			receivers[index].method = NewFunc(method.pos, method.pkg, method.name, nil)
+			*nextOrder++
+			receivers[index].method.setOrder(*nextOrder)
+			// The declaring name is this method's in the builds that declare it.
+			if check.Defs != nil {
+				check.variational.info.defs.record(declaration.fdecl.Name, receivers[index].method, builds[index], check.variational.all, false)
+			}
+		}
+		check.objMap[receivers[index].method] = &narrowed
+	}
+	return receivers
+}
+
+// lastOrder is the highest order given to an object of the package so far.
+func (check *Checker) lastOrder() uint32 {
+	last := uint32(0)
+	for obj := range check.objMap {
+		last = max(last, obj.order())
+	}
+	return last
+}
+
+// typeSpecIn is the declaration of tname that build compiles, when build isn't zero and tname is declared again in
+// another build's file, and else declared, its first.
+func (check *Checker) typeSpecIn(tname *TypeName, declared *ast.TypeSpec, build Mask) *ast.TypeSpec {
+	if build == 0 || tname.variation == nil {
+		return declared
+	}
+	for _, each := range tname.variation.decls {
+		if each.mask&build != 0 {
+			return each.decl.tdecl
+		}
+	}
+	return declared
+}
+
 // iotaOf is a constant's iota as collectObjects left it in the constant's value, or nil.
 func iotaOf(obj Object) constant.Value {
 	if constantObject, isConstant := obj.(*Const); isConstant {
@@ -967,14 +1045,19 @@ func iotaOf(obj Object) constant.Value {
 	return nil
 }
 
-// variantKind tells package-level objects' kinds apart.
-func variantKind(obj Object) int {
+// variantKind tells package-level objects' kinds apart, declared by d. A defined type and an alias are of different
+// kinds: a defined type is a type of its own, and an alias another's, so a name that is one in some builds and the
+// other in the rest can't be one object (the driver's Handle, a defined type on unix and syscall.Handle on windows).
+func variantKind(obj Object, d *declInfo) int {
 	switch obj.(type) {
 	case *Const:
 		return 1
 	case *Var:
 		return 2
 	case *TypeName:
+		if d.tdecl != nil && d.tdecl.Assign.IsValid() {
+			return 5
+		}
 		return 3
 	case *Func:
 		return 4

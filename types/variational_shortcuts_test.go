@@ -41,3 +41,69 @@ func TestVariationalPublishesOnlyTheErrorsOfRunsThatSurvive(t *testing.T) {
 			len(published), strings.Join(published, "; "))
 	}
 }
+
+// aliasTargetFiles declare an alias whose target differs by build, and methods declared on it in a file every build
+// compiles: each build's method is its own target's, as each build's plain check has it. Handle is the driver's case,
+// a defined type on unix and an alias of the platform's own type on windows, returned by a shared function. The
+// generic function's constraint follows the alias, as the fuzzer's seeds have it.
+var aliasTargetFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+type First int
+
+type Second int
+
+func (Value) Measure() int { return 1 }
+
+func Measured(value Value) int { return value.Measure() }
+
+func (*Value) Reset() {}
+
+func ResetPointer(value *Value) { value.Reset() }
+
+func Invalid() Handle { return Handle(invalidHandle) }
+
+func Direct() Handle { return invalidHandle }
+
+func Zero() Handle {
+	var handle Handle
+	return handle
+}
+
+var Converted Alias = Alias(1)
+
+var Identified = Identity(Alias(2))
+`},
+	{"platform_unix.go", buildDarwin | buildLinux, `package fork
+
+type Value = First
+
+type Handle int
+
+const invalidHandle Handle = -1
+
+type Alias = int16
+
+func Identity[T ~int16](value T) T { return value }
+`},
+	{"platform_windows.go", buildWindows, `package fork
+
+type Value = Second
+
+type SystemHandle uintptr
+
+type Handle = SystemHandle
+
+const invalidHandle = ^SystemHandle(0)
+
+type Alias = int8
+
+func Identity[T ~int8](value T) T { return value }
+`},
+}
+
+// TestVariationalProjectsAnAliasWhoseTargetDiffersByBuild is the projection test over aliasTargetFiles.
+func TestVariationalProjectsAnAliasWhoseTargetDiffersByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, aliasTargetFiles)
+}

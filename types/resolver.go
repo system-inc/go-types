@@ -506,19 +506,25 @@ func (check *Checker) collectObjects() {
 
 	check.methods = make(map[*TypeName][]*Func)
 	var declared methodDeclarations
+	// cohere's variational spike: a receiver whose alias names another base type in other builds declares a method of
+	// each of those base types, each in the builds that name it (methodReceivers).
+	nextOrder := check.lastOrder()
 	for i := range methods {
 		m := &methods[i]
 		// Determine the receiver base type and associate m with it.
-		ptr, base := check.resolveBaseTypeName(m.ptr, m.recv)
-		if base != nil {
-			m.obj.hasPtrRecv_ = ptr
-			// cohere's variational spike: a method declared again in another build's file is one method with a
-			// declaration for each, and each build's index among its type's methods is noted.
-			declared.note(check, base, m.obj)
-			if check.mergeMethodVariant(check.methods[base], m.obj) {
+		for _, receiver := range check.methodReceivers(m.obj, m.ptr, m.recv, &nextOrder) {
+			ptr, base, method := receiver.ptr, receiver.base, receiver.method
+			if base == nil {
 				continue
 			}
-			check.methods[base] = append(check.methods[base], m.obj)
+			method.hasPtrRecv_ = ptr
+			// cohere's variational spike: a method declared again in another build's file is one method with a
+			// declaration for each, and each build's index among its type's methods is noted.
+			declared.note(check, base, method)
+			if check.mergeMethodVariant(check.methods[base], method) {
+				continue
+			}
+			check.methods[base] = append(check.methods[base], method)
 		}
 	}
 	declared.setIndices(check)
@@ -588,7 +594,10 @@ func (check *Checker) unpackRecv(rtyp ast.Expr, unpackParams bool) (ptr bool, ba
 // in package scope, and there can be at most one pointer indirection. Traversals
 // through generic alias types are not permitted. If no such type name exists, the
 // returned base is nil.
-func (check *Checker) resolveBaseTypeName(ptr bool, name *ast.Ident) (ptr_ bool, base *TypeName) {
+//
+// cohere's variational spike: build, when not zero, is the one build to resolve name in, following the alias
+// declaration that build compiles.
+func (check *Checker) resolveBaseTypeName(ptr bool, name *ast.Ident, build Mask) (ptr_ bool, base *TypeName) {
 	// Algorithm: Starting from name, which is expected to denote a type,
 	// we follow that type through non-generic alias declarations until
 	// we reach a non-alias type name.
@@ -614,6 +623,8 @@ func (check *Checker) resolveBaseTypeName(ptr bool, name *ast.Ident) (ptr_ bool,
 
 		// we're done if tdecl describes a defined type (not an alias)
 		tdecl := check.objMap[tname].tdecl // must exist for objects in package scope
+		// cohere's variational spike: a name declared again in another build's file follows that build's declaration.
+		tdecl = check.typeSpecIn(tname, tdecl, build)
 		if !tdecl.Assign.IsValid() {
 			return ptr, tname
 		}
