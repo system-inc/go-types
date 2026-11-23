@@ -143,7 +143,7 @@ var mapper = &Inner{Value: 2}
 
 // TestVariationalCheckProjectsTheHardCases is the projection test over hardFiles.
 func TestVariationalCheckProjectsTheHardCases(t *testing.T) {
-	// Not parallel: the fork holds a variational check's unit state in package variables, one check at a time.
+	t.Parallel()
 	forked := projectAndCompare(t, hardFiles)
 	if forked["UsesFd"] {
 		t.Errorf("UsesFd forked, though Fd's signature is one in every build")
