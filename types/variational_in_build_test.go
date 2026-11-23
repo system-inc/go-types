@@ -163,6 +163,46 @@ func TestVariationalOutsideReadsEveryBuild(test *testing.T) {
 	})
 }
 
+// TestVariationalCarryTakesInBuildToAnotherGoroutine checks the hard fixture, then, under InBuild for windows, reads
+// N on a goroutine of its own twice: started with Carry, it reads windows's N, and started plainly, with no state, it
+// reads the host's, darwin's, as every goroutine InBuild didn't start on does. Outside InBuild, Carry's goroutine reads
+// the host's too.
+func TestVariationalCarryTakesInBuildToAnotherGoroutine(test *testing.T) {
+	test.Parallel()
+	fileSet := token.NewFileSet()
+	parsed := parseFixture(test, fileSet, hardFiles)
+	checked, checkError := (&types.Config{Variation: &types.Variation{Builds: everyBuild, Files: parsed.masks},
+		Importer: fixtureImporter{}}).Check("fork", fileSet, parsed.files, &types.Info{})
+	if checkError != nil {
+		test.Fatal(checkError)
+	}
+	n := checked.Scope().Lookup("N").(*types.Const)
+	readOnAnotherGoroutine := func(start func(read func())) string {
+		var value string
+		done := make(chan struct{})
+		start(func() {
+			defer close(done)
+			value = n.Val().ExactString()
+		})
+		<-done
+		return value
+	}
+	var carried, plain string
+	types.InBuild(buildWindows, func() {
+		carried = readOnAnotherGoroutine(func(read func()) { go types.Carry(read)() })
+		plain = readOnAnotherGoroutine(func(read func()) { go read() })
+	})
+	if carried != "2" {
+		test.Errorf("N read on a goroutine started with Carry under InBuild for windows: %q, windows's is \"2\"", carried)
+	}
+	if plain != "4" {
+		test.Errorf("N read on a goroutine started plainly under InBuild for windows: %q, the host's is \"4\"", plain)
+	}
+	if outside := readOnAnotherGoroutine(func(read func()) { go types.Carry(read)() }); outside != "4" {
+		test.Errorf("N read on a goroutine started with Carry outside InBuild: %q, the host's is \"4\"", outside)
+	}
+}
+
 // spellMember spells a package-level object by its kind and type, a constant's value, and a type name's underlying
 // type and the method sets of its named type and a pointer to it, each method by name, type, index and indirection.
 func spellMember(object types.Object) string {

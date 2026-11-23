@@ -506,6 +506,21 @@ func InBuild(build Mask, work func()) {
 	work()
 }
 
+// Carry takes the build the calling goroutine reads as under InBuild to work, which another goroutine runs: it returns
+// a func that runs work under InBuild of that build on whatever goroutine calls it, or work as it is when the caller
+// runs under no InBuild. A goroutine starts with no state and reads as the host, so analysis that starts goroutines of
+// its own under InBuild (an IR builder building functions in parallel, a dispatcher running shards) starts each with
+// Carry to keep reading as the build. It captures InBuild's build alone, never a check's state, since a check starts no
+// goroutines, nor Outside's. With no check or InBuild running anywhere, the capture is one atomic load.
+func Carry(work func()) func() {
+	state := runningState()
+	if state == nil || !state.inBuild {
+		return work
+	}
+	build := state.mask
+	return func() { InBuild(build, work) }
+}
+
 // hostRead is the state of every read on a goroutine running no variational check and no InBuild: it answers as the
 // host, build 0, has it, as the host's plain check would, and never splits. It is one state for every such goroutine,
 // so it is read-only but for narrowed, which another goroutine's reads may raise: a memo kept only when nothing
