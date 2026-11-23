@@ -208,6 +208,8 @@ type objectVariant struct {
 	mask Mask
 	typ  Type
 	val  constant.Value
+	// tparams are a generic type's type parameters, which its right-hand side typ is written in.
+	tparams *TypeParamList
 }
 
 type declVariant struct {
@@ -224,6 +226,9 @@ type namedVariation struct {
 type namedVariant struct {
 	mask Mask
 	rhs  Type
+	// tparams are a generic type's type parameters in these builds, which rhs is written in: each build's declaration
+	// declares its own.
+	tparams *TypeParamList
 	// underlying is rhs's underlying type once resolved. Checks of many packages read one named type at once, so it is
 	// kept atomically.
 	underlying atomic.Pointer[resolvedUnderlying]
@@ -263,7 +268,7 @@ func SetVariants(obj Object, variants []Variant) {
 	base := obj.(interface{ base() *object }).base()
 	collapsed := make([]objectVariant, 0, len(variants))
 	for _, variant := range variants {
-		collapsed = appendVariant(collapsed, objectVariant{variant.Builds, variant.Type, variant.Value})
+		collapsed = appendVariant(collapsed, objectVariant{mask: variant.Builds, typ: variant.Type, val: variant.Value})
 	}
 	if len(collapsed) == 0 {
 		return
@@ -463,8 +468,13 @@ func appendVariant(variants []objectVariant, variant objectVariant) []objectVari
 	return append(variants, variant)
 }
 
-// sameAnswer reports whether two answers are alike: identical types, and equal values when they are constants.
+// sameAnswer reports whether two answers are alike: identical types, equal values when they are constants, and one
+// list of type parameters when they are a generic type's, since a right-hand side that never names its type
+// parameters is identical across declarations whose constraints differ.
 func sameAnswer(left objectVariant, right objectVariant) bool {
+	if left.tparams != right.tparams {
+		return false
+	}
 	if (left.typ == nil) != (right.typ == nil) {
 		return false
 	}
@@ -590,10 +600,17 @@ func presentHere(variation *objectVariation) bool {
 
 // pickUnderlying is n's underlying type in the current unit's builds, splitting the unit when they differ.
 func (n *Named) pickUnderlying() Type {
+	variant, state := n.pickVariant()
+	return variant.resolved(state)
+}
+
+// pickVariant is n's variant in the current unit's builds, splitting the unit when they differ, and the check reading
+// in a unit, or nil.
+func (n *Named) pickVariant() (*namedVariant, *variationalState) {
 	variation := n.variation
 	state := readingState()
 	if state == nil {
-		return variation.variants[0].resolved(state)
+		return &variation.variants[0], state
 	}
 	state.narrowed++
 	mask := state.mask
@@ -615,7 +632,43 @@ func (n *Named) pickUnderlying() Type {
 	if first < 0 {
 		first = 0
 	}
-	return variation.variants[first].resolved(state)
+	return &variation.variants[first], state
+}
+
+// variesTypeParameters reports whether n is a generic type declared again by build, with each build's own type
+// parameters (or generic in only some builds).
+func (n *Named) variesTypeParameters() bool {
+	if n.variation == nil {
+		return false
+	}
+	for index := range n.variation.variants {
+		if n.variation.variants[index].tparams != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// expandVariants gives instance n, whose origin is a generic type declared again by build, its right-hand side in
+// each of those builds: the origin's right-hand side there, with that build's own type parameters replaced by n's type
+// arguments. Its underlying type is then read by build, as its origin's is. The expansion is of every build at once,
+// whichever unit reads n first, so it runs outside every unit: a split inside it would leave n half unpacked.
+func (n *Named) expandVariants() {
+	origin := n.inst.orig
+	if !origin.variesTypeParameters() {
+		return
+	}
+	variants := make([]namedVariant, len(origin.variation.variants))
+	Outside(func() {
+		for index := range origin.variation.variants {
+			declared := &origin.variation.variants[index]
+			variants[index].mask = declared.mask
+			variants[index].tparams = declared.tparams
+			variants[index].rhs = n.expandRightSide(declared.rhs, declared.tparams)
+		}
+	})
+	n.fromRHS = variants[0].rhs
+	n.variation = &namedVariation{variants: variants}
 }
 
 // resolved is variant's underlying type, following its right-hand side through aliases and named types, read under
@@ -642,6 +695,27 @@ func (variant *namedVariant) resolved(state *variationalState) Type {
 		variant.underlying.Store(&resolvedUnderlying{underlying})
 	}
 	return underlying
+}
+
+// expandMethodVariants gives expanded, orig instantiated for instance t, orig's answers by build instantiated for t
+// as well. cloneFunc copied orig's variation, whose answers are orig's own signatures, written in its receiver type
+// parameters; expanded keeps the builds orig exists in, and answers with each build's signature instantiated. Every
+// build's is instantiated at once, whichever unit reads the method first, so outside every unit, as expandVariants.
+func (t *Named) expandMethodVariants(orig *Func, expanded *Func) {
+	if orig.variation == nil {
+		return
+	}
+	variation := *orig.variation
+	variation.variants = make([]objectVariant, len(orig.variation.variants))
+	Outside(func() {
+		for index, variant := range orig.variation.variants {
+			variation.variants[index] = variant
+			if signature, isSignature := variant.typ.(*Signature); isSignature {
+				variation.variants[index].typ = t.instantiateMethodSignature(orig, signature)
+			}
+		}
+	})
+	expanded.variation = &variation
 }
 
 // fileMask is the builds file compiles in.
@@ -1133,7 +1207,7 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 			case *TypeName:
 				check.typeDecl(obj, declared.decl.tdecl)
 				if named := asNamed(obj.typ); isDefinedType && named != nil {
-					answers = append(answers, objectVariant{mask: builds, typ: named.fromRHS})
+					answers = append(answers, objectVariant{mask: builds, typ: named.fromRHS, tparams: named.tparams})
 				} else {
 					answers = append(answers, objectVariant{mask: builds, typ: obj.typ})
 				}
@@ -1167,10 +1241,13 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 		if named != nil && len(collapsed) > 1 {
 			variants := make([]namedVariant, len(collapsed))
 			for index, answer := range collapsed {
-				variants[index] = namedVariant{mask: answer.mask, rhs: answer.typ}
+				variants[index] = namedVariant{mask: answer.mask, rhs: answer.typ, tparams: answer.tparams}
 			}
 			named.variation = &namedVariation{variants: variants}
+			// Read outside every unit, the type is its first build's: its right-hand side and the type parameters it
+			// is written in, which the last run replaced.
 			named.fromRHS = collapsed[0].typ
+			named.tparams = collapsed[0].tparams
 		}
 		if named != nil {
 			base.typ = named

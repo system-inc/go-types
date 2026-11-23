@@ -245,6 +245,8 @@ func (n *Named) unpack() *Named {
 
 		n.fromRHS = n.expandRHS()
 		n.tparams = orig.tparams
+		// cohere's variational spike: an instance of a generic type declared again by build is expanded in each.
+		n.expandVariants()
 
 		if len(orig.methods) == 0 {
 			n.setState(lazyLoaded | unpacked | hasMethods) // nothing further to do
@@ -395,7 +397,14 @@ func (t *Named) Origin() *Named {
 
 // TypeParams returns the type parameters of the named type t, or nil.
 // The result is non-nil for an (originally) generic type even if it is instantiated.
-func (t *Named) TypeParams() *TypeParamList { return t.unpack().tparams }
+func (t *Named) TypeParams() *TypeParamList {
+	// cohere's variational spike: a generic type declared again by build has each build's own type parameters.
+	if origin := t.Origin(); origin.variesTypeParameters() {
+		variant, _ := origin.pickVariant()
+		return variant.tparams
+	}
+	return t.unpack().tparams
+}
 
 // SetTypeParams sets the type parameters of the named type t.
 // t must not have type arguments.
@@ -481,7 +490,16 @@ func (t *Named) expandMethod(i int) *Func {
 		check.objDecl(orig)
 	}
 
-	oldSig := orig.typ.(*Signature)
+	// cohere's variational spike: a method with answers by build is instantiated in each of them too.
+	expanded := cloneFunc(orig, t.instantiateMethodSignature(orig, orig.typ.(*Signature)))
+	t.expandMethodVariants(orig, expanded)
+	return expanded
+}
+
+// instantiateMethodSignature is oldSig, a signature of t's origin's method orig, instantiated for t (cohere's
+// variational spike: split from expandMethod, so each build's signature of a method declared again by build is).
+func (t *Named) instantiateMethodSignature(orig *Func, oldSig *Signature) *Signature {
+	check := t.check
 	rtpars := oldSig.rparams.list()
 	rtargs := t.inst.targs.list()
 
@@ -525,7 +543,7 @@ func (t *Named) expandMethod(i int) *Func {
 	newSig.recv = cloneVar(oldSig.recv, rtyp)
 	newSig.rparams = nil
 
-	return cloneFunc(orig, newSig)
+	return newSig
 }
 
 // SetUnderlying sets the underlying type and marks t as complete.
@@ -605,6 +623,11 @@ func (n *Named) Underlying() Type {
 		return n.pickUnderlying()
 	}
 	n.unpack()
+	// cohere's variational spike: unpacking an instance of a generic type declared again by build gives it its
+	// underlying type by build.
+	if n.variation != nil {
+		return n.pickUnderlying()
+	}
 
 	// The gccimporter depends on writing a nil underlying via NewNamed and
 	// immediately reading it back. Rather than putting that in Named.under
@@ -779,11 +802,17 @@ func (n *Named) expandRHS() (rhs Type) {
 		n.inst.ctxt = NewContext()
 	}
 
+	return n.expandRightSide(n.inst.orig.rhs(), n.inst.orig.tparams)
+}
+
+// expandRightSide is expandRHS for declared, an origin's right-hand side written in tpars (cohere's variational spike:
+// split from expandRHS, so an instance of a generic type declared again by build is expanded with each build's own).
+func (n *Named) expandRightSide(declared Type, tpars *TypeParamList) (rhs Type) {
+	check := n.check
 	ctxt := n.inst.ctxt
 	orig := n.inst.orig
 
 	targs := n.inst.targs
-	tpars := orig.tparams
 
 	if targs.Len() != tpars.Len() {
 		return Typ[Invalid]
@@ -798,7 +827,7 @@ func (n *Named) expandRHS() (rhs Type) {
 		ctxt = check.context()
 	}
 
-	rhs = check.subst(n.obj.pos, orig.rhs(), m, n, ctxt)
+	rhs = check.subst(n.obj.pos, declared, m, n, ctxt)
 
 	// TODO(markfreeman): Can we handle this in substitution?
 	// If the RHS is an interface, we must set the receiver of interface methods
@@ -807,7 +836,7 @@ func (n *Named) expandRHS() (rhs Type) {
 		if methods, copied := replaceRecvType(iface.methods, orig, n); copied {
 			// If the RHS doesn't use type parameters, it may not have been
 			// substituted; we need to craft a new interface first.
-			if iface == orig.rhs() {
+			if iface == declared {
 				assert(iface.complete) // otherwise we are copying incomplete data
 
 				crafted := check.newInterface()

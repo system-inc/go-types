@@ -107,3 +107,59 @@ func TestVariationalProjectsAnAliasWhoseTargetDiffersByBuild(t *testing.T) {
 	t.Parallel()
 	projectAndCompare(t, aliasTargetFiles)
 }
+
+// genericDefinitionFiles declare a generic type again in each build's file, its type parameters' constraints and its
+// fields differing, and one generic type in a shared file whose fields differ by build: each build's instances
+// substitute that build's own type parameters. Holder is the fuzzer's class, its constraint following an alias whose
+// target differs by build, instantiated with the alias and given a generic function's result.
+var genericDefinitionFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+func BoxValue(box Box[int]) int { return box.Value }
+
+var Held = Holder[Alias]{Value: Identity(Alias(2))}
+
+var Unheld Alias = Held.Get()
+
+type Sized[T any] struct{ values [Length]T }
+
+func First(sized Sized[string]) string { return sized.values[0] }
+`},
+	{"platform_unix.go", buildDarwin | buildLinux, `package fork
+
+type Box[T any] struct{ Value T }
+
+type Alias = int16
+
+type Holder[T ~int16] struct{ Value T }
+
+func (holder Holder[T]) Get() T { return holder.Value }
+
+func Identity[T ~int16](value T) T { return value }
+
+const Length = 2
+`},
+	{"platform_windows.go", buildWindows, `package fork
+
+type Box[T ~int] struct {
+	Extra string
+	Value T
+}
+
+type Alias = int8
+
+type Holder[T ~int8] struct{ Value T }
+
+func (holder Holder[T]) Get() T { return holder.Value }
+
+func Identity[T ~int8](value T) T { return value }
+
+const Length = 3
+`},
+}
+
+// TestVariationalProjectsAGenericTypeDeclaredByBuild is the projection test over genericDefinitionFiles.
+func TestVariationalProjectsAGenericTypeDeclaredByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, genericDefinitionFiles)
+}
