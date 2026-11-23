@@ -279,3 +279,53 @@ func TestVariationalProjectsAMethodWhoseSignatureDiffersByBuild(t *testing.T) {
 	t.Parallel()
 	projectAndCompare(t, methodSignatureFiles)
 }
+
+// pairFiles declare variables two at a time from one call in each build's own file, the call's results differing by
+// build: A and B together in every build, and E and F, and P and Q, together on darwin and linux and each alone on
+// windows. A shared file reads F before E, so F's declarations run first, and E's windows declaration is still to run
+// after them. It reads P before Q, and P's windows declaration reads Q, which P's darwin and linux run typed beside it:
+// windows must read Q as its own declaration types it.
+var pairFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+var G = F
+
+var C, D = A, B
+
+func Used() (any, any) { return A, B }
+
+func Separate() (any, any) { return E, F }
+
+func Crossed() (any, any) { return P, Q }
+`},
+	{"pair_unix.go", buildDarwin | buildLinux, `package fork
+
+func pair() (int, string) { return 1, "" }
+
+var A, B = pair()
+
+var E, F = pair()
+
+var P, Q = pair()
+`},
+	{"pair_windows.go", buildWindows, `package fork
+
+func pair() (string, []byte) { return "", nil }
+
+var A, B = pair()
+
+var F = 1.5
+
+var E = true
+
+var P = Q
+
+var Q = 1.5
+`},
+}
+
+// TestVariationalProjectsVariablesDeclaredTogetherByBuild is the projection test over pairFiles.
+func TestVariationalProjectsVariablesDeclaredTogetherByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, pairFiles)
+}
