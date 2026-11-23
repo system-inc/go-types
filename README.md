@@ -39,6 +39,9 @@ it is a commit of one concern.
 - `gcimporter` reads each object of a package's export data the first time it is looked up, and a named type's
   declaration (its type parameters, underlying type and methods) the first time any of it is needed, through
   `types.NewTypeNameLazy`, which `types` exports as types2 does.
+- `gcimporter`'s universe can be eager (`Universe.Eager`): each package it imports is read whole before `Import`
+  returns it, every object and every type they reach, so checks of many packages at once over one universe read only
+  decoded types (`gcimporter/whole.go`).
 - `types.Outside` writes nothing outside every unit, so goroutines resolving imported objects while no check runs
   share no write.
 - `types` offers an undefined name's near match only from the names present in the unit's builds.
