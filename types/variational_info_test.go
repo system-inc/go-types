@@ -21,8 +21,8 @@ import (
 // is one object for all of them, at its first declaration, and declarations alike across builds fold into one, as the
 // model has it (variational.go). Selections compare by kind, index, indirection and object, and instances by their
 // type arguments and type, expressions' types and values as the census spells them, and scopes by the names they
-// declare and the object each name is. The variational check's diagnostics, told apart, are every build's plain
-// diagnostics.
+// declare and the object each name is. The variational check's diagnostics whose builds hold each build are that
+// build's plain diagnostics.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
 	for name, fixtures := range map[string][]fixtureFile{
@@ -44,11 +44,11 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			info := fullInfo()
 			// A fixture may report errors, as the abandoned errors fixture does: they're compared with the plain
 			// checks' rather than refused.
-			var published []string
-			plainDiagnostics := map[string]bool{}
+			var published []types.Error
+			plainDiagnostics := map[types.Mask][]string{}
 			if _, checkError := (&types.Config{Variation: variation, Importer: unsafeImporter{},
-				Error: func(diagnostic error) { published = append(published, diagnostic.Error()) }}).Check("fork",
-				fileSet, parsed.files, info); checkError != nil && len(published) == 0 {
+				Error: func(diagnostic error) { published = append(published, diagnostic.(types.Error)) }}).Check(
+				"fork", fileSet, parsed.files, info); checkError != nil && len(published) == 0 {
 				test.Fatalf("variational check: %v", checkError)
 			}
 			overlaid := 0
@@ -59,9 +59,10 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			for index, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
 				spelling.build = build
 				plain := fullInfo()
-				if _, checkError := (&types.Config{Importer: unsafeImporter{},
-					Error: func(diagnostic error) { plainDiagnostics[diagnostic.Error()] = true }}).Check("fork", fileSet,
-					parsed.filesIn(build), plain); checkError != nil && !plainDiagnostics[checkError.Error()] {
+				if _, checkError := (&types.Config{Importer: unsafeImporter{}, Error: func(diagnostic error) {
+					plainDiagnostics[build] = append(plainDiagnostics[build], diagnostic.Error())
+				}}).Check("fork", fileSet, parsed.filesIn(build), plain); checkError != nil &&
+					len(plainDiagnostics[build]) == 0 {
 					test.Fatalf("plain check of build %03b: %v", build, checkError)
 				}
 				if len(plain.Defs) == 0 || len(plain.Uses) == 0 {

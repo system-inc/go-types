@@ -140,13 +140,19 @@ func (err *error_) report() {
 		}
 	}
 
+	// cohere's variational spike: every part of an error holds in the builds of the error's own position.
+	var builds Mask
+	if check.variational != nil {
+		builds, _ = check.infoBuilds(err.posn().Pos())
+	}
+
 	if multiError {
 		for i := range err.desc {
 			p := &err.desc[i]
-			check.handleError(i, p.posn, err.code, p.msg, err.soft)
+			check.handleError(i, p.posn, err.code, p.msg, err.soft, builds)
 		}
 	} else {
-		check.handleError(0, err.posn(), err.code, err.msg(), err.soft)
+		check.handleError(0, err.posn(), err.code, err.msg(), err.soft, builds)
 	}
 
 	// make sure the error is not reported twice
@@ -154,7 +160,7 @@ func (err *error_) report() {
 }
 
 // handleError should only be called by error_.report.
-func (check *Checker) handleError(index int, posn positioner, code Code, msg string, soft bool) {
+func (check *Checker) handleError(index int, posn positioner, code Code, msg string, soft bool, builds Mask) {
 	assert(code != 0)
 
 	if index == 0 {
@@ -195,6 +201,7 @@ func (check *Checker) handleError(index int, posn positioner, code Code, msg str
 		Pos:        span.pos,
 		Msg:        stripAnnotations(msg),
 		Soft:       soft,
+		Builds:     builds,
 		go116code:  code,
 		go116start: span.start,
 		go116end:   span.end,

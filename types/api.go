@@ -53,6 +53,9 @@ type Error struct {
 	Pos  token.Pos      // error position
 	Msg  string         // error message
 	Soft bool           // if set, error is "soft"
+	// cohere's variational spike: the builds the error holds in, in a variational check: the builds of the unit run
+	// that reported it, or, reported outside every unit, the builds its file compiles in. Zero in a plain check.
+	Builds Mask
 
 	// go116code is a future API, unexported as the set of error codes is large
 	// and likely to change significantly during experimentation. Tools wishing

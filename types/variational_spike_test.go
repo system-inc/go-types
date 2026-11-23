@@ -135,8 +135,8 @@ func projectAndCompare(t *testing.T, fixtures []fixtureFile) map[string]bool {
 }
 
 // projectAndCompareWithDiagnostics is projectAndCompare, and when diagnosing it lets the checks report errors: the
-// variational check's diagnostics, each spelled as Error spells it, must be every build's plain diagnostics together,
-// and are returned in the order it published them.
+// variational check's diagnostics whose builds hold each build, each spelled as Error spells it, must be that build's
+// plain diagnostics, and are returned in the order it published them.
 func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diagnosing bool) (map[string]bool,
 	[]string,
 ) {
@@ -154,15 +154,15 @@ func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diag
 	}
 	variation := &types.Variation{Builds: everyBuild, Files: masks}
 	configuration := &types.Config{Variation: variation, Importer: unsafeImporter{}}
-	var published []string
+	var published []types.Error
 	if diagnosing {
-		configuration.Error = func(diagnostic error) { published = append(published, diagnostic.Error()) }
+		configuration.Error = func(diagnostic error) { published = append(published, diagnostic.(types.Error)) }
 	}
 	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
 	if _, checkError := configuration.Check("fork", fileSet, files, info); checkError != nil && !diagnosing {
 		t.Fatalf("variational check: %v", checkError)
 	}
-	plainDiagnostics := map[string]bool{}
+	plainDiagnostics := map[types.Mask][]string{}
 	if len(info.Types) == 0 {
 		t.Fatal("the variational check recorded no answers")
 	}
@@ -199,14 +199,16 @@ func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diag
 		plain := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
 		plainConfiguration := &types.Config{Importer: unsafeImporter{}}
 		if diagnosing {
-			plainConfiguration.Error = func(diagnostic error) { plainDiagnostics[diagnostic.Error()] = true }
+			plainConfiguration.Error = func(diagnostic error) {
+				plainDiagnostics[build] = append(plainDiagnostics[build], diagnostic.Error())
+			}
 		}
 		if _, checkError := plainConfiguration.Check("fork", fileSet, built, plain); checkError != nil && !diagnosing {
 			t.Fatalf("plain check of build %03b: %v", build, checkError)
 		}
 		compareTypes(t, fileSet, fmt.Sprintf("build %03b", build), projections[index], plain.Types)
 	}
-	compareDiagnostics(t, published, plainDiagnostics)
+	spelled := compareDiagnostics(t, published, plainDiagnostics)
 	var forkedNames []string
 	for name := range forked {
 		forkedNames = append(forkedNames, name)
@@ -214,26 +216,48 @@ func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diag
 	sort.Strings(forkedNames)
 	t.Logf("functions that forked: %s; units %d, restarts %d", strings.Join(forkedNames, ", "), variation.Units,
 		variation.Restarts)
-	return forked, published
+	return forked, spelled
 }
 
-// compareDiagnostics requires the diagnostics a variational check published to be, once each told apart, the plain
-// checks' diagnostics together. A diagnostic reported in more than one build may be published once for each run that
-// reports it, so their counts aren't compared here.
-func compareDiagnostics(t *testing.T, published []string, plain map[string]bool) {
+// compareDiagnostics requires, for each build, the diagnostics a variational check published whose builds hold it to
+// be exactly that build's plain diagnostics, each spelled as Error spells it (its position and message), as many of
+// each. It returns the published diagnostics spelled, in the order published.
+func compareDiagnostics(t *testing.T, published []types.Error, plain map[types.Mask][]string) []string {
 	t.Helper()
-	publishedOnce := map[string]bool{}
-	for _, diagnostic := range published {
-		publishedOnce[diagnostic] = true
-		if !plain[diagnostic] {
-			t.Errorf("the variational check reported %q, and no build's plain check does", diagnostic)
+	spelled := make([]string, len(published))
+	for index, diagnostic := range published {
+		spelled[index] = diagnostic.Error()
+		if diagnostic.Builds == 0 || diagnostic.Builds&^everyBuild != 0 {
+			t.Errorf("the variational check reported %q for builds %03b", spelled[index], diagnostic.Builds)
 		}
 	}
-	for diagnostic := range plain {
-		if !publishedOnce[diagnostic] {
-			t.Errorf("a plain check reported %q, and the variational check doesn't", diagnostic)
+	for _, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
+		counts := map[string]int{}
+		for _, diagnostic := range plain[build] {
+			counts[diagnostic]++
+		}
+		for index, diagnostic := range published {
+			if diagnostic.Builds&build != 0 {
+				counts[spelled[index]]--
+			}
+		}
+		var differing []string
+		for diagnostic := range counts {
+			differing = append(differing, diagnostic)
+		}
+		sort.Strings(differing)
+		for _, diagnostic := range differing {
+			switch count := counts[diagnostic]; {
+			case count > 0:
+				t.Errorf("build %03b: the plain check reports %q %d more times than the variational check", build,
+					diagnostic, count)
+			case count < 0:
+				t.Errorf("build %03b: the variational check reports %q %d more times than the plain check", build,
+					diagnostic, -count)
+			}
 		}
 	}
+	return spelled
 }
 
 // compareTypes requires projected, one build's projection of a variational check's Types, to be plain, that build's
