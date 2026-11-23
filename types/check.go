@@ -8,10 +8,10 @@ package types
 
 import (
 	"fmt"
+	. "github.com/system-inc/go-types/internal/types/errors"
 	"go/ast"
 	"go/constant"
 	"go/token"
-	. "github.com/system-inc/go-types/internal/types/errors"
 	"os"
 )
 
@@ -95,6 +95,8 @@ type action struct {
 	version goVersion   // applicable language version
 	f       func()      // action to be executed
 	desc    *actionDesc // action description; may be nil, requires debug to be set
+
+	persistent bool // cohere's variational spike: pushed by a finished declaration, so kept when a unit around it restarts
 }
 
 // If debug is set, describef sets a printf-formatted description for action a.
@@ -161,6 +163,11 @@ type Checker struct {
 	objPathIdx map[Object]int        // map of object to object path index during type-checking (for cycle reporting)
 	cleaners   []cleaner             // list of types that may need a final cleanup at the end of type-checking
 
+	// cohere's variational spike
+	vundo       []vundo    // what each answer write replaced while a unit that could restart runs
+	untypedLog  []ast.Expr // untyped expressions in the order remembered, so a unit can flush or drop its own
+	recordOrder int64      // the iota of the constant being declared, or -1 (see vrecord.order)
+
 	// environment within which the current object is type-checked (valid only
 	// for the duration of type-checking a specific object)
 	environment
@@ -188,6 +195,9 @@ func (check *Checker) rememberUntyped(e ast.Expr, lhs bool, mode operandMode, ty
 		m = make(map[ast.Expr]exprInfo)
 		check.untyped = m
 	}
+	if _, remembered := m[e]; !remembered && variational.active {
+		check.untypedLog = append(check.untypedLog, e)
+	}
 	m[e] = exprInfo{lhs, mode, typ, val}
 }
 
@@ -198,6 +208,13 @@ func (check *Checker) rememberUntyped(e ast.Expr, lhs bool, mode operandMode, ty
 // later returns the pushed action so one can provide a description
 // via action.describef for debugging, if desired.
 func (check *Checker) later(f func()) *action {
+	if variational.active {
+		// A delayed action is a unit: it runs under the builds that were current when it was pushed, and again for
+		// each group of them when a read inside splits it.
+		builds := variational.mask
+		plain := f
+		f = func() { check.runUnit(builds, plain, false) }
+	}
 	i := len(check.delayed)
 	check.delayed = append(check.delayed, action{version: check.version, f: f})
 	return &check.delayed[i]
@@ -419,6 +436,9 @@ func (check *Checker) Files(files []*ast.File) (err error) {
 	// type-checking of the rest of the package.
 
 	defer check.handleBailout(&err)
+	if check.startVariational() {
+		defer check.endVariational()
+	}
 	check.checkFiles(files)
 	return
 }
