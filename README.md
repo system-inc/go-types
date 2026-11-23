@@ -11,15 +11,15 @@ Taken at go1.27.4, upstream commit `7b2881024c95a11ddb86663a616340aa3a88b67f` ("
 over go1.27.1 (`862c888e612ac346c7c4d99c9392bdfd265f33b0`), the first commit's release.
 Test files and testdata are left out.
 
-| Here | Upstream |
-|---|---|
-| `types` | `src/go/types` |
-| `internal/types/errors` | `src/internal/types/errors` |
-| `internal/goversion` | `src/internal/goversion` |
-| `gcimporter` | `src/go/internal/gcimporter` |
-| `exportdata` | `src/internal/exportdata` |
-| `pkgbits` | `src/internal/pkgbits` |
-| `saferio` | `src/internal/saferio` |
+| Here                    | Upstream                     |
+| ----------------------- | ---------------------------- |
+| `types`                 | `src/go/types`               |
+| `internal/types/errors` | `src/internal/types/errors`  |
+| `internal/goversion`    | `src/internal/goversion`     |
+| `gcimporter`            | `src/go/internal/gcimporter` |
+| `exportdata`            | `src/internal/exportdata`    |
+| `pkgbits`               | `src/internal/pkgbits`       |
+| `saferio`               | `src/internal/saferio`       |
 
 The first commit is upstream's text with only the import paths rewritten to this module. Every change of ours after
 it is a commit of one concern.
