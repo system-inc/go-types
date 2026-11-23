@@ -256,3 +256,152 @@ func TestVariationalComparesEachBuildsFieldsWithItsOwnMethods(t *testing.T) {
 		t.Error("the variational check reported nothing, and linux's plain check reports F's field and method clash")
 	}
 }
+
+// methodSignatureFiles declare a method on a shared type in each build's own file, its result a slice on darwin and
+// linux and a string on windows, on the value and on the pointer receiver. A shared file calls each, takes each as a
+// method value and as a method expression, and assigns the type to an interface declared by build, and each build's
+// plain check reads its own build's signature.
+var methodSignatureFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+type W struct{}
+
+func Called(w W) int { return len(w.M()) }
+
+func PointerCalled(w *W) int { return len(w.P()) }
+
+func Valued(w W) int {
+	method := w.M
+	return len(method())
+}
+
+func Expressed() int { return len(W.M(W{})) }
+
+func PointerExpressed(w *W) int { return len((*W).P(w)) }
+
+var Value = W{}.M
+
+var Expression = W.M
+
+var PointerValue = (&W{}).P
+
+var PointerExpression = (*W).P
+
+var Held I = W{}
+
+func Satisfied(w *W) I { return w }
+`},
+	{"method_unix.go", buildDarwin | buildLinux, `package fork
+
+func (W) M() []int { return nil }
+
+func (*W) P() []int { return nil }
+
+type I interface{ M() []int }
+`},
+	{"method_windows.go", buildWindows, `package fork
+
+func (W) M() string { return "" }
+
+func (*W) P() string { return "" }
+
+type I interface{ M() string }
+`},
+}
+
+// TestVariationalProjectsAMethodWhoseSignatureDiffersByBuild is the projection test over methodSignatureFiles.
+func TestVariationalProjectsAMethodWhoseSignatureDiffersByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, methodSignatureFiles)
+}
+
+// pairFiles declare variables two at a time from one call in each build's own file, the call's results differing by
+// build: A and B together in every build, and E and F, and P and Q, together on darwin and linux and each alone on
+// windows. A shared file reads F before E, so F's declarations run first, and E's windows declaration is still to run
+// after them. It reads P before Q, and P's windows declaration reads Q, which P's darwin and linux run typed beside it:
+// windows must read Q as its own declaration types it.
+var pairFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+var G = F
+
+var C, D = A, B
+
+func Used() (any, any) { return A, B }
+
+func Separate() (any, any) { return E, F }
+
+func Crossed() (any, any) { return P, Q }
+`},
+	{"pair_unix.go", buildDarwin | buildLinux, `package fork
+
+func pair() (int, string) { return 1, "" }
+
+var A, B = pair()
+
+var E, F = pair()
+
+var P, Q = pair()
+`},
+	{"pair_windows.go", buildWindows, `package fork
+
+func pair() (string, []byte) { return "", nil }
+
+var A, B = pair()
+
+var F = 1.5
+
+var E = true
+
+var P = Q
+
+var Q = 1.5
+`},
+}
+
+// TestVariationalProjectsVariablesDeclaredTogetherByBuild is the projection test over pairFiles.
+func TestVariationalProjectsVariablesDeclaredTogetherByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, pairFiles)
+}
+
+// definedOverFiles define types over Box and Pair, whose underlying types differ by build: Box declared again in each
+// build's file, and Pair a generic type declared again by build, read through its instance Pair[int64]. A function's
+// local types and package-level ones are defined over each, and their sizes read in a body, in a package-level
+// variable's initializer and in a body whose local type is over the instance.
+var definedOverFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+import "unsafe"
+
+var Early = func() uintptr { type Local Box; var local Local; return unsafe.Sizeof(local) }()
+
+func LocalSize() uintptr { type Local Box; return unsafe.Sizeof(Local{}) }
+
+func LocalPairSize() uintptr { type Local Pair[int64]; return unsafe.Sizeof(Local{}) }
+
+type Sized Box
+
+type SizedPair Pair[int64]
+
+func Sizes() (uintptr, uintptr) { return unsafe.Sizeof(Sized{}), unsafe.Sizeof(SizedPair{}) }
+`},
+	{"box_unix.go", buildDarwin | buildLinux, `package fork
+
+type Box struct{ Value int64 }
+
+type Pair[T any] struct{ Left T }
+`},
+	{"box_windows.go", buildWindows, `package fork
+
+type Box struct{ Value, Extra int64 }
+
+type Pair[T any] struct{ Left, Right T }
+`},
+}
+
+// TestVariationalProjectsATypeDefinedOverOneThatDiffersByBuild is the projection test over definedOverFiles.
+func TestVariationalProjectsATypeDefinedOverOneThatDiffersByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, definedOverFiles)
+}

@@ -94,8 +94,15 @@ func (s *Scope) Lookup(name string) Object {
 	if obj != nil && variationsExist.Load() {
 		// cohere's variational spike: an object that exists in only some builds is found in those alone, and another
 		// of the same name may stand in the rest.
-		if !presentHere(variationOf(obj)) {
+		// The importer's alternates are on the object, read from the variation presentHere read (never nil when the
+		// object is absent), so an object with none costs nothing more.
+		if variation := variationOf(obj); !presentHere(variation) {
 			for _, alternate := range s.alternates[name] {
+				if presentHere(variationOf(alternate)) {
+					return alternate
+				}
+			}
+			for _, alternate := range variation.alternates {
 				if presentHere(variationOf(alternate)) {
 					return alternate
 				}
@@ -141,7 +148,19 @@ func (s *Scope) Insert(obj Object) Object {
 	if obj.Parent() == nil {
 		obj.setParent(s)
 	}
+	// cohere's variational spike: the objects of the name the merging importer keeps beside obj are s's as well.
+	s.adoptAlternates(obj)
 	return nil
+}
+
+// adoptAlternates makes s the parent of the objects the merging importer keeps beside obj, the objects of its name in
+// other builds, as obj's is (cohere's variational spike).
+func (s *Scope) adoptAlternates(obj Object) {
+	for _, alternate := range AlternatesOf(obj) {
+		if alternate.Parent() == nil {
+			alternate.setParent(s)
+		}
+	}
 }
 
 // InsertLazy is like Insert, but allows deferring construction of the
@@ -224,6 +243,9 @@ func resolve(name string, obj Object) Object {
 			if obj.Parent() == nil {
 				obj.setParent(lazy.parent)
 			}
+			// cohere's variational spike: the objects of the name the merging importer keeps beside it are the
+			// scope's as well.
+			lazy.parent.adoptAlternates(obj)
 			lazy.obj = obj
 		})
 

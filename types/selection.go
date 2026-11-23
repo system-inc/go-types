@@ -98,7 +98,8 @@ func (s *Selection) Type() Type {
 		// TODO(mark) Align this with call.go if possible.
 		// The type of x.f is a method with its receiver type set
 		// to the type of x.
-		sig := *s.obj.(*Func).typ.(*Signature)
+		// cohere's variational spike: a method declared again by build has each build's own signature.
+		sig := *s.obj.(*Func).Type().(*Signature)
 		recv := *sig.recv
 		recv.typ = s.recv
 		sig.recv = &recv
@@ -109,7 +110,8 @@ func (s *Selection) Type() Type {
 		// and an additional first argument with the same type as x.
 		// TODO(gri) Similar code is already in call.go - factor!
 		// TODO(gri) Compute this eagerly to avoid allocations.
-		sig := *s.obj.(*Func).typ.(*Signature)
+		// cohere's variational spike: a method declared again by build has each build's own signature.
+		sig := *s.obj.(*Func).Type().(*Signature)
 		arg0 := *sig.recv
 		sig.recvold = sig.recv // stash receiver (for consistency with call.go)
 		sig.recv = nil

@@ -413,7 +413,8 @@ func (check *Checker) missingMethod(V, T Type, static bool, equivalent func(x, y
 				break
 			}
 
-			if !equivalent(f.typ, m.typ) {
+			// cohere's variational spike: a method declared again by build has each build's own signature.
+			if !equivalent(f.Type(), m.Type()) {
 				state = wrongSig
 				break
 			}
@@ -462,7 +463,8 @@ func (check *Checker) missingMethod(V, T Type, static bool, equivalent func(x, y
 				break
 			}
 
-			if !equivalent(f.typ, m.typ) {
+			// cohere's variational spike: a method declared again by build has each build's own signature.
+			if !equivalent(f.Type(), m.Type()) {
 				state = wrongSig
 				break
 			}
@@ -587,7 +589,8 @@ func (check *Checker) funcString(f *Func, pkgInfo bool) string {
 	w := newTypeWriter(buf, qf)
 	w.pkgInfo = pkgInfo
 	w.paramNames = false
-	w.signature(f.typ.(*Signature))
+	// cohere's variational spike: a method declared again by build is spelled with each build's own signature.
+	w.signature(f.Type().(*Signature))
 	return buf.String()
 }
 

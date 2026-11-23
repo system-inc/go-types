@@ -884,7 +884,8 @@ func (check *Checker) selector(x *operand, e *ast.SelectorExpr, wantType bool) {
 			// method expression
 			check.recordSelection(e, MethodExpr, x.typ(), obj, index, indirect)
 
-			sig := obj.typ.(*Signature)
+			// cohere's variational spike: a method declared again by build has each build's own signature.
+			sig := obj.Type().(*Signature)
 			if sig.recv == nil {
 				check.error(e, InvalidDeclCycle, "illegal cycle in method declaration")
 				goto Error
@@ -974,7 +975,8 @@ func (check *Checker) selector(x *operand, e *ast.SelectorExpr, wantType bool) {
 			x.mode_ = value
 
 			// remove/stash receiver
-			sig := *obj.typ.(*Signature)
+			// cohere's variational spike: a method declared again by build has each build's own signature.
+			sig := *obj.Type().(*Signature)
 			sig.recvold = sig.recv
 			sig.recv = nil
 			x.typ_ = &sig

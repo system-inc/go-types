@@ -649,6 +649,14 @@ type objectVariation struct {
 	// methodIndices are a method's index among its named type's methods in each build, as each build's own declaration
 	// orders them, when the merging importer gives them (SetMethodIndex).
 	methodIndices []maskedIndex
+	// alternates are the objects of a package-level object's name, of other kinds, in builds it doesn't exist in, when
+	// the merging importer read them (SetAlternates). They are kept on the object rather than in its scope's
+	// alternates, since a merged package's scope is read by many checks at once while its other names are merged.
+	alternates []Object
+	// answered are a variable's answers in the builds where another variable's n:1 declaration typed it beside that
+	// one. The variable stays untyped until they cover every build that declares it, and when it has declarations of
+	// its own still to run (a name declared two at a time on unix and alone on windows), they run in the rest alone.
+	answered []objectVariant
 }
 
 type objectVariant struct {
@@ -863,20 +871,43 @@ func SetPresence(obj Object, builds Mask) {
 	base.ensureVariation().presence = builds
 }
 
-// UnderlyingVariant is one of a named type's underlying types, for the merging importer.
+// SetAlternates gives obj, a package-level object the merging importer read, the objects of its name declared as other
+// kinds in the builds obj doesn't exist in, each present in its own builds (SetPresence). A lookup of the name in
+// their builds finds them. It is the importer's twin of the checker's Scope.alternates, kept on the object because a
+// merged package's scope is read by many checks at once while its other names are merged.
+func SetAlternates(obj Object, alternates []Object) {
+	base := obj.(interface{ base() *object }).base()
+	base.ensureVariation().alternates = alternates
+}
+
+// AlternatesOf is the objects of obj's name declared as other kinds in the builds obj doesn't exist in, which the
+// merging importer gave it, or nil.
+func AlternatesOf(obj Object) []Object {
+	if variation := variationOf(obj); variation != nil {
+		return variation.alternates
+	}
+	return nil
+}
+
+// UnderlyingVariant is one of a named type's underlying types, for the merging importer. A generic type's variant
+// gives the type parameters its underlying type is written in: the named type's own (TypeParams), or type parameters
+// its builds' declarations bind alone, when their constraints differ from the named type's.
 type UnderlyingVariant struct {
 	Builds     Mask
 	Underlying Type
+	TypeParams []*TypeParam
 }
 
-// SetUnderlyingVariants gives n its underlying types by build. Alike ones are kept as one, and when one is left n is
-// left as it is.
+// SetUnderlyingVariants gives n its underlying types by build. Alike ones, identical and written in the same type
+// parameters, are kept as one, and when one is left n is left as it is. Type parameters other than n's own are bound
+// here, once for each variant that gives them.
 func SetUnderlyingVariants(n *Named, variants []UnderlyingVariant) {
 	var alike []UnderlyingVariant
 	for _, variant := range variants {
 		merged := false
 		for index := range alike {
-			if Identical(alike[index].Underlying, variant.Underlying) {
+			if slices.Equal(alike[index].TypeParams, variant.TypeParams) &&
+				Identical(alike[index].Underlying, variant.Underlying) {
 				alike[index].Builds |= variant.Builds
 				merged = true
 				break
@@ -887,11 +918,25 @@ func SetUnderlyingVariants(n *Named, variants []UnderlyingVariant) {
 		}
 	}
 	if len(alike) > 1 {
+		own := n.unpack().tparams
+		// Type parameters given by more than one variant, whose underlying types differ, are bound once.
+		bound := map[*TypeParam]*TypeParamList{}
 		kept := make([]namedVariant, len(alike))
 		for index, variant := range alike {
 			kept[index].mask = variant.Builds
 			kept[index].rhs = variant.Underlying
 			kept[index].underlying.Store(&resolvedUnderlying{variant.Underlying})
+			switch {
+			case len(variant.TypeParams) == 0:
+				// Not generic: written in no type parameters.
+			case slices.Equal(variant.TypeParams, own.list()):
+				kept[index].tparams = own
+			case bound[variant.TypeParams[0]] != nil:
+				kept[index].tparams = bound[variant.TypeParams[0]]
+			default:
+				kept[index].tparams = bindTParams(variant.TypeParams)
+				bound[variant.TypeParams[0]] = kept[index].tparams
+			}
 		}
 		n.variation = &namedVariation{variants: kept}
 	}
@@ -927,7 +972,8 @@ func UnderlyingVariantsOf(n *Named) []UnderlyingVariant {
 	variants := make([]UnderlyingVariant, len(n.variation.variants))
 	for index := range n.variation.variants {
 		variant := &n.variation.variants[index]
-		variants[index] = UnderlyingVariant{Builds: variant.mask, Underlying: variant.rhs}
+		variants[index] = UnderlyingVariant{Builds: variant.mask, Underlying: variant.rhs,
+			TypeParams: variant.tparams.list()}
 	}
 	return variants
 }
@@ -1699,40 +1745,41 @@ func variantKind(obj Object, d *declInfo) int {
 func (check *Checker) declareVariational(obj Object, d *declInfo) {
 	base := obj.(interface{ base() *object }).base()
 	variation := variationOf(obj)
-	var decls []declVariant
-	if variation != nil && len(variation.decls) > 0 {
-		decls = variation.decls
-	} else {
-		mask := d.mask
-		if mask == 0 {
-			mask = check.variational.all
-		}
-		decls = []declVariant{{mask: mask, decl: d, iota: iotaOf(obj)}}
-	}
+	decls := check.declarationsOf(obj, d)
 	typeName, isTypeName := obj.(*TypeName)
 	isDefinedType := isTypeName && !decls[0].decl.tdecl.Assign.IsValid()
 	if isDefinedType || len(decls) > 1 {
 		variation = base.ensureVariation()
 	}
 	var answers []objectVariant
-	// An n:1 variable declaration types every variable on its left at once, so each run starts them all untyped and
-	// keeps each one's answer.
+	// An n:1 variable declaration types every variable on its left at once, in each build's file its own left side, so
+	// each run starts them all untyped, and hands each sibling its answer and leaves it untyped again: another build's
+	// run must never read it as this one typed it.
 	var siblings []*Var
-	siblingAnswers := map[*Var][]objectVariant{}
-	if variable, isVariable := obj.(*Var); isVariable && len(decls) == 1 && len(decls[0].decl.lhs) > 1 {
-		for _, sibling := range decls[0].decl.lhs {
-			if sibling != variable {
-				siblings = append(siblings, sibling)
-			}
-		}
-	}
 	every := Mask(0)
 	for _, declared := range decls {
 		every |= declared.mask
+		// A variable another's n:1 declaration typed in these builds already holds its answers for them.
+		if taken, covered := takeAnswered(base.variation, declared.mask); covered {
+			answers = append(answers, taken...)
+			continue
+		}
+		var declaredSiblings []*Var
+		if variable, isVariable := obj.(*Var); isVariable && len(declared.decl.lhs) > 1 {
+			for _, sibling := range check.mergedLeftSide(declared.decl.lhs) {
+				if sibling == variable {
+					continue
+				}
+				declaredSiblings = append(declaredSiblings, sibling)
+				if !slices.Contains(siblings, sibling) {
+					siblings = append(siblings, sibling)
+				}
+			}
+		}
 		check.runUnit(declared.mask, func() {
 			builds := check.variational.mask
 			base.typ = nil
-			for _, sibling := range siblings {
+			for _, sibling := range declaredSiblings {
 				sibling.typ = nil
 			}
 			if constantObject, isConstant := obj.(*Const); isConstant {
@@ -1755,8 +1802,10 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 				check.decl = declared.decl
 				check.varDecl(obj, check.mergedLeftSide(declared.decl.lhs), declared.decl.vtyp, declared.decl.init)
 				answers = append(answers, objectVariant{mask: builds, typ: obj.typ})
-				for _, sibling := range siblings {
-					siblingAnswers[sibling] = append(siblingAnswers[sibling], objectVariant{mask: builds, typ: sibling.typ})
+				for _, sibling := range declaredSiblings {
+					siblingVariation := sibling.ensureVariation()
+					siblingVariation.answered = append(siblingVariation.answered, objectVariant{mask: builds, typ: sibling.typ})
+					sibling.typ = nil
 				}
 			case *TypeName:
 				check.typeDecl(obj, declared.decl.tdecl)
@@ -1774,17 +1823,7 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 		}, true)
 	}
 	for _, sibling := range siblings {
-		var siblingCollapsed []objectVariant
-		for _, answer := range siblingAnswers[sibling] {
-			siblingCollapsed = appendVariant(siblingCollapsed, answer)
-		}
-		if len(siblingCollapsed) == 0 {
-			continue
-		}
-		sibling.typ = siblingCollapsed[0].typ
-		if len(siblingCollapsed) > 1 {
-			sibling.ensureVariation().variants = siblingCollapsed
-		}
+		check.settleSibling(sibling)
 	}
 	var collapsed []objectVariant
 	for _, answer := range answers {
@@ -1823,6 +1862,79 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 	if len(collapsed) > 1 {
 		variation = base.ensureVariation()
 		variation.variants = collapsed
+	}
+}
+
+// declarationsOf are obj's declarations, each with the builds it holds in: every build's when it was declared in more
+// than one file, and else d alone.
+func (check *Checker) declarationsOf(obj Object, d *declInfo) []declVariant {
+	if variation := variationOf(obj); variation != nil && len(variation.decls) > 0 {
+		return variation.decls
+	}
+	mask := d.mask
+	if mask == 0 {
+		mask = check.variational.all
+	}
+	return []declVariant{{mask: mask, decl: d, iota: iotaOf(obj)}}
+}
+
+// takeAnswered takes from variation the answers another variable's n:1 declarations gave in builds, and reports
+// whether they cover builds. They are left where they are when they don't.
+func takeAnswered(variation *objectVariation, builds Mask) ([]objectVariant, bool) {
+	if variation == nil {
+		return nil, false
+	}
+	answered := Mask(0)
+	for _, answer := range variation.answered {
+		if answer.mask&builds != 0 {
+			answered |= answer.mask
+		}
+	}
+	if builds&^answered != 0 {
+		return nil, false
+	}
+	var taken []objectVariant
+	variation.answered = slices.DeleteFunc(variation.answered, func(answer objectVariant) bool {
+		if answer.mask&builds == 0 {
+			return false
+		}
+		taken = append(taken, answer)
+		return true
+	})
+	return taken, true
+}
+
+// settleSibling types sibling with the answers other variables' n:1 declarations gave it, once they cover every build
+// that declares it. While its own declarations in other builds are still to run, it stays untyped with them, and the
+// first read of it declares it in the rest. A sibling typed already was declared on its own, from the answers.
+func (check *Checker) settleSibling(sibling *Var) {
+	if sibling.typ != nil || sibling.variation == nil {
+		return
+	}
+	answered := Mask(0)
+	for _, answer := range sibling.variation.answered {
+		answered |= answer.mask
+	}
+	declared := Mask(0)
+	if d := check.objMap[sibling]; d != nil {
+		for _, each := range check.declarationsOf(sibling, d) {
+			declared |= each.mask
+		}
+	}
+	if declared&^answered != 0 {
+		return
+	}
+	var collapsed []objectVariant
+	for _, answer := range sibling.variation.answered {
+		collapsed = appendVariant(collapsed, answer)
+	}
+	sibling.variation.answered = nil
+	if len(collapsed) == 0 {
+		return
+	}
+	sibling.typ = collapsed[0].typ
+	if len(collapsed) > 1 {
+		sibling.variation.variants = collapsed
 	}
 }
 

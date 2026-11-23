@@ -14,19 +14,23 @@ import (
 
 // projectionFixtures are the fixtures whose projection to each build is compared with that build's plain check.
 var projectionFixtures = map[string][]fixtureFile{
-	"spike":            fixtureFiles,
-	"hard":             hardFiles,
-	"usage":            usageFiles,
-	"methods":          methodOrderFiles,
-	"abandoned errors": abandonedErrorFiles,
-	"alias targets":    aliasTargetFiles,
-	"generic types":    genericDefinitionFiles,
-	"kinds":            kindFiles,
-	"scopes":           scopeFiles,
-	"init order":       initOrderFiles,
-	"imports":          importFiles,
-	"interfaces":       interfaceFiles,
-	"sizes":            sizeFiles,
+	"spike":             fixtureFiles,
+	"hard":              hardFiles,
+	"usage":             usageFiles,
+	"methods":           methodOrderFiles,
+	"abandoned errors":  abandonedErrorFiles,
+	"alias targets":     aliasTargetFiles,
+	"generic types":     genericDefinitionFiles,
+	"kinds":             kindFiles,
+	"scopes":            scopeFiles,
+	"init order":        initOrderFiles,
+	"imports":           importFiles,
+	"interfaces":        interfaceFiles,
+	"sizes":             sizeFiles,
+	"method signatures": methodSignatureFiles,
+	"pairs":             pairFiles,
+	"defined over":      definedOverFiles,
+	"field methods":     fieldMethodFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
