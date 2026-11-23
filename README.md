@@ -29,7 +29,14 @@ it is a commit of one concern.
 - `types` checks a package once for every build at once (`types/variational.go` says how). A package-level object
   keeps one identity across builds and only its properties vary by build. A unit of work runs under the builds it
   holds in, and runs again for each group of builds whose reads differ.
-- `gcimporter` reads each object of a package's export data the first time it is looked up.
+- `gcimporter` reads each object of a package's export data the first time it is looked up, and a named type's
+  declaration (its type parameters, underlying type and methods) the first time any of it is needed, through
+  `types.NewTypeNameLazy`, which `types` exports as types2 does.
+- `types.Outside` writes nothing outside every unit, so goroutines resolving imported objects while no check runs
+  share no write.
+- `types` offers an undefined name's near match only from the names present in the unit's builds.
+- `types.CompleteWithMethods` gives an imported interface its type set whole, for an importer whose interface embeds
+  merged interfaces that differ by build.
 - `canonical` is ours: it spells the fork's types as cohere's platform census spells go/types', so a check projected
   to one build compares exactly with that build's plain answers.
 
