@@ -435,16 +435,12 @@ func (r *reader) obj() (types.Object, []types.Type) {
 
 	idx := r.Reloc(pkgbits.SectionObj)
 	pkg, name, tag := r.p.objIdx(idx)
-	// cohere's: a type whose declaration is being read is taken as it stands, and an alias reached inside its own
-	// declaration is read again, since looking either up would wait on its own lazy entry.
+	// cohere's: an alias reached inside its own declaration is read again, since looking it up would wait on its own
+	// lazy entry. A named type needs no such care: its entry gives its type name at once, and its declaration is read
+	// later, by its loader.
 	var obj types.Object
-	if pkg != nil {
-		key := objectKey{path: pkg.Path(), name: name}
-		if declaring := r.p.universe.declaring[key]; declaring != nil {
-			obj = declaring
-		} else if r.p.universe.aliasing[key] {
-			obj = r.p.readObject(idx, pkg, name, tag)
-		}
+	if pkg != nil && r.p.universe.aliasing[objectKey{path: pkg.Path(), name: name}] {
+		obj = r.p.readObject(idx, pkg, name, tag)
 	}
 	if obj == nil {
 		obj = pkgScope(pkg).Lookup(name)
@@ -547,68 +543,13 @@ func (pr *pkgReader) readObject(idx pkgbits.Index, objPkg *types.Package, objNam
 		case pkgbits.ObjType:
 			pos := r.pos()
 
-			obj := types.NewTypeName(pos, objPkg, objName, nil)
-			named := types.NewNamed(obj, nil, nil)
-			declare(obj)
-			pr.universe.declaring[key] = obj
-			defer delete(pr.universe.declaring, key)
-
-			named.SetTypeParams(r.typeParamNames(false))
-
-			underlying := r.typ().Underlying()
-
-			// If the underlying type is an interface, we need to
-			// duplicate its methods so we can replace the receiver
-			// parameter's type (#49906).
-			if iface, ok := underlying.(*types.Interface); ok && iface.NumExplicitMethods() != 0 {
-				methods := make([]*types.Func, iface.NumExplicitMethods())
-				for i := range methods {
-					fn := iface.ExplicitMethod(i)
-					sig := fn.Signature()
-
-					recv := types.NewVar(fn.Pos(), fn.Pkg(), "", named)
-					recv.SetKind(types.RecvVar)
-					methods[i] = types.NewFunc(fn.Pos(), fn.Pkg(), fn.Name(), types.NewSignature(recv, sig.Params(), sig.Results(), sig.Variadic()))
-				}
-
-				embeds := make([]types.Type, iface.NumEmbeddeds())
-				for i := range embeds {
-					embeds[i] = iface.EmbeddedType(i)
-				}
-
-				newIface := types.NewInterfaceType(methods, embeds)
-				r.p.universe.ifaces = append(r.p.universe.ifaces, newIface)
-				underlying = newIface
-			}
-
-			named.SetUnderlying(underlying)
-
-			for i, n := 0, r.Len(); i < n; i++ {
-				named.AddMethod(r.method())
-			}
-
-			if r.Version().Has(pkgbits.GenericMethods) {
-				for range r.Len() {
-					// Careful: objIdx is used to read in package-scoped declarations, which
-					// methods are not. Instead, decode it here. This makes it easier to
-					// associate it with the type and avoids the main objIdx loop.
-					idx := r.Reloc(pkgbits.SectionObj)
-
-					r := pr.tempReader(pkgbits.SectionObj, idx, pkgbits.SyncObject1)
-					r.dict = pr.objDictIdx(idx)
-
-					pos := r.pos()
-					assert(r.Bool()) // generic method
-					pkg, name := r.selector()
-					rtparams := r.typeParamNames(true)
-					recv := r.param(types.RecvVar)
-					tparams := r.typeParamNames(false)
-					sig := r.signature(recv, rtparams, tparams)
-
-					pr.retireReader(r)
-					named.AddMethod(types.NewFunc(pos, pkg, name, sig))
-				}
-			}
+			// cohere's: as types2's importer does, the type name is made now and its declaration (type parameters,
+			// underlying type and methods) is read the first time any of it is needed, by the named type's loader.
+			declare(types.NewTypeNameLazy(pos, objPkg, objName, func(named *types.Named) ([]*types.TypeParam, types.Type, []*types.Func, []func()) {
+				return pr.universe.load(func() ([]*types.TypeParam, types.Type, []*types.Func) {
+					return r.namedDeclaration(named)
+				})
+			}))
 
 		case pkgbits.ObjVar:
 			pos := r.pos()
@@ -618,6 +559,69 @@ func (pr *pkgReader) readObject(idx pkgbits.Index, objPkg *types.Package, objNam
 	}
 
 	return declared
+}
+
+// namedDeclaration reads the rest of a named type's declaration, for its loader: its type parameters, underlying type
+// and methods (cohere's: the eager reader's body for a type, run on demand).
+func (r *reader) namedDeclaration(named *types.Named) ([]*types.TypeParam, types.Type, []*types.Func) {
+	pr := r.p
+	tparams := r.typeParamNames(false)
+
+	underlying := r.typ().Underlying()
+
+	// If the underlying type is an interface, we need to
+	// duplicate its methods so we can replace the receiver
+	// parameter's type (#49906).
+	if iface, ok := underlying.(*types.Interface); ok && iface.NumExplicitMethods() != 0 {
+		methods := make([]*types.Func, iface.NumExplicitMethods())
+		for i := range methods {
+			fn := iface.ExplicitMethod(i)
+			sig := fn.Signature()
+
+			recv := types.NewVar(fn.Pos(), fn.Pkg(), "", named)
+			recv.SetKind(types.RecvVar)
+			methods[i] = types.NewFunc(fn.Pos(), fn.Pkg(), fn.Name(), types.NewSignature(recv, sig.Params(), sig.Results(), sig.Variadic()))
+		}
+
+		embeds := make([]types.Type, iface.NumEmbeddeds())
+		for i := range embeds {
+			embeds[i] = iface.EmbeddedType(i)
+		}
+
+		newIface := types.NewInterfaceType(methods, embeds)
+		pr.universe.ifaces = append(pr.universe.ifaces, newIface)
+		underlying = newIface
+	}
+
+	methods := make([]*types.Func, r.Len())
+	for i := range methods {
+		methods[i] = r.method()
+	}
+
+	if r.Version().Has(pkgbits.GenericMethods) {
+		for range r.Len() {
+			// Careful: objIdx is used to read in package-scoped declarations, which
+			// methods are not. Instead, decode it here. This makes it easier to
+			// associate it with the type and avoids the main objIdx loop.
+			idx := r.Reloc(pkgbits.SectionObj)
+
+			r := pr.tempReader(pkgbits.SectionObj, idx, pkgbits.SyncObject1)
+			r.dict = pr.objDictIdx(idx)
+
+			pos := r.pos()
+			assert(r.Bool()) // generic method
+			pkg, name := r.selector()
+			rtparams := r.typeParamNames(true)
+			recv := r.param(types.RecvVar)
+			tparams := r.typeParamNames(false)
+			sig := r.signature(recv, rtparams, tparams)
+
+			pr.retireReader(r)
+			methods = append(methods, types.NewFunc(pos, pkg, name, sig))
+		}
+	}
+
+	return tparams, underlying, methods
 }
 
 func (pr *pkgReader) objDictIdx(idx pkgbits.Index) *readerDict {
