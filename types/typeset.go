@@ -198,9 +198,9 @@ func computeInterfaceTypeSet(check *Checker, pos token.Pos, ityp *Interface) *_T
 	// keeps no memo, so the next read computes it for its own builds.
 	completed := false
 	if state := check.readState(); state != nil {
-		narrowedBefore := state.narrowed
+		narrowedBefore := state.narrowed.Load()
 		defer func() {
-			if !completed || state.narrowed != narrowedBefore {
+			if !completed || state.narrowed.Load() != narrowedBefore {
 				ityp.tset = nil
 			}
 		}()
@@ -395,10 +395,10 @@ func computeUnionTypeSet(check *Checker, unionSets map[*Union]*_TypeSet, pos tok
 
 	// cohere's variational spike: as in computeInterfaceTypeSet, an abandoned or narrowed type set keeps no memo.
 	if state := check.readState(); state != nil {
-		narrowedBefore := state.narrowed
+		narrowedBefore := state.narrowed.Load()
 		completed := false
 		defer func() {
-			if !completed || state.narrowed != narrowedBefore {
+			if !completed || state.narrowed.Load() != narrowedBefore {
 				delete(unionSets, utyp)
 			}
 		}()

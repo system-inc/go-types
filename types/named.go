@@ -132,6 +132,8 @@ type Named struct {
 	loader func(*Named) ([]*TypeParam, Type, []*Func, []func())
 
 	variation *namedVariation // cohere's variational spike: the underlying type by build, when it differs
+	// cohere's variational spike: the methods each build has, in its own order, once read as one build
+	buildMethods atomic.Pointer[buildMethodOrders]
 }
 
 // instance holds information that is only necessary for instantiated named

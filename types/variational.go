@@ -13,7 +13,8 @@
 // Many packages are checked at once, each by its own Checker on its own goroutine, so each check holds its own state
 // (variationalState): the checker reaches it directly, and the reads that never see a Checker (Named.Underlying,
 // Object.Type, Const.Val, Scope.Lookup, a method's presence, a type set's memo) find it by the goroutine they run on.
-// A goroutine that runs no variational check finds none and reads every property as its first build's. go/types
+// A goroutine that runs no variational check and no InBuild finds none and reads every property as the host (build 0)
+// has it (hostRead). go/types
 // starts no goroutine inside a check, and the merging importer resolves an object on the goroutine whose check reads
 // it, so a check's reads are all on its goroutine. Threading the state through every such read instead would change
 // 234 declarations and 875 calls of the fork, and every caller of go/types' API beside it (#dfnzqjb, from the
@@ -147,21 +148,20 @@ func (answers Answers) with(builds Mask, tv TypeAndValue, order int64) Answers {
 // variationalState is the state of one variational check in progress, held by its Checker, or of a read as one
 // build after a check has ended (InBuild).
 type variationalState struct {
-	all       Mask
-	mask      Mask   // the builds the current unit runs under
-	depth     int    // how many units are running; a read outside every unit never splits
-	narrowed  uint64 // how many reads have answered for the current unit's builds alone
+	all   Mask
+	mask  Mask // the builds the current unit runs under
+	depth int  // how many units are running; a read outside every unit never splits
+	// narrowed is how many reads have answered for the current unit's builds alone. It is atomic because hostRead is
+	// one state for every goroutine that reads with none of its own.
+	narrowed  atomic.Uint64
 	variation *Variation
 	info      infoLogs // the Info maps' answers by build until the check ends (variational_info.go)
 	// outer is the check this goroutine was running when this one began, put back when this one ends: an importer
 	// may check a package from source in the middle of another check.
 	outer *variationalState
-	// inBuild is set for a read as one build (InBuild), never for a check: a scope's names and a named type's methods
-	// then leave out what the build doesn't have.
+	// inBuild is set for a read as one build (InBuild and hostRead), never for a check: a scope's names and a named
+	// type's methods then leave out what the build doesn't have.
 	inBuild bool
-	// methodOrders are, under InBuild, each named type's methods the build has, by their index among the origin's
-	// methods, in the build's order (methodsInBuild).
-	methodOrders map[*Named][]int
 	// deps are what each dependency's builds were before a write inside a unit that could restart (addVariationalDep).
 	deps []depUndo
 	// merges counts the declarations mergeVariant folded into an earlier object of their name, so each has its own
@@ -348,73 +348,107 @@ func InBuild(build Mask, work func()) {
 		panic("types.InBuild: build must be a single build")
 	}
 	state := &variationalState{all: build, mask: build, depth: 1, inBuild: true}
-	readsInBuild.Add(1)
 	state.register()
-	defer func() {
-		state.unregister()
-		readsInBuild.Add(-1)
-	}()
+	defer state.unregister()
 	work()
 }
 
-// inBuildState is the state of the read as one build running on this goroutine (InBuild), or nil.
-func inBuildState() *variationalState {
-	if readsInBuild.Load() == 0 {
+// hostRead is the state of every read on a goroutine running no variational check and no InBuild: it answers as the
+// host, build 0, has it, as the host's plain check would, and never splits. It is one state for every such goroutine,
+// so it is read-only but for narrowed, which another goroutine's reads may raise: a memo kept only when nothing
+// narrowed is then kept less often, never wrongly.
+var hostRead = &variationalState{all: 1, mask: 1, depth: 1, inBuild: true}
+
+// viewState is the state of a read as one build, which leaves out what the build doesn't have: the InBuild running on
+// this goroutine, or with no check and no InBuild on it, hostRead. It is nil in a check, which leaves nothing out, and
+// in a process where nothing differs by build.
+func viewState() *variationalState {
+	if !variationsExist.Load() {
 		return nil
 	}
-	if state := runningState(); state != nil && state.inBuild {
+	state := runningState()
+	if state == nil {
+		return hostRead
+	}
+	if state.inBuild {
 		return state
 	}
 	return nil
 }
 
-// methodsInBuild is, under InBuild, the indices among n's origin's methods of the methods the build has, in the
-// build's own order, and whether it answers: outside InBuild, and for a type whose methods are every build's in one
-// order, the origin's own list answers.
+// buildMethodOrders are a named type's methods each build has, by their index among its methods, in each build's own
+// order, or none when every build has every method in one order.
+type buildMethodOrders struct {
+	differs bool
+	orders  [8][]int
+}
+
+// sameMethodOrders is the buildMethodOrders of every type whose methods are every build's in one order.
+var sameMethodOrders = &buildMethodOrders{}
+
+// methodsInBuild is, read as one build (viewState), the indices among n's origin's methods of the methods the build
+// has, in the build's own order, and whether it answers: in a check, and for a type whose methods are every build's
+// in one order, the origin's own list answers. The orders are kept on the origin once read, since a read as one build
+// comes after its check.
 func (n *Named) methodsInBuild() ([]int, bool) {
-	state := inBuildState()
+	// A type found once to have every build's methods in one order answers with its own list everywhere, so it needn't
+	// find the goroutine's state.
+	origin := n.Origin()
+	orders := origin.buildMethods.Load()
+	if orders == sameMethodOrders {
+		return nil, false
+	}
+	state := viewState()
 	if state == nil {
 		return nil, false
 	}
-	origin := n.Origin()
-	if order, known := state.methodOrders[origin]; known {
-		return order, order != nil
+	if orders == nil {
+		orders = origin.methodOrdersByBuild()
+		origin.buildMethods.Store(orders)
 	}
-	methods := origin.unpack().methods
-	var order []int
-	if methodsDifferByBuild(origin) {
+	if !orders.differs {
+		return nil, false
+	}
+	return orders.orders[bits.TrailingZeros8(uint8(state.mask))], true
+}
+
+// methodOrdersByBuild is n's methods in each build, as methodsInBuild reads them.
+func (n *Named) methodOrdersByBuild() *buildMethodOrders {
+	if !methodsDifferByBuild(n) {
+		return sameMethodOrders
+	}
+	orders := &buildMethodOrders{differs: true}
+	methods := n.unpack().methods
+	for build := range 8 {
+		mask := Mask(1) << build
 		type placed struct{ index, origin int }
 		var present []placed
 		for index, method := range methods {
 			// A method absent from the build has no place among its methods.
 			if variation := method.variation; variation != nil && variation.presence != 0 &&
-				variation.presence&state.mask == 0 {
+				variation.presence&mask == 0 {
 				continue
 			}
-			inBuild, _ := methodIndexIn(method, origin, state.mask)
+			inBuild, _ := methodIndexIn(method, n, mask)
 			present = append(present, placed{inBuild, index})
 		}
 		slices.SortStableFunc(present, func(left placed, right placed) int { return left.index - right.index })
-		order = make([]int, len(present))
+		orders.orders[build] = make([]int, len(present))
 		for index, each := range present {
-			order[index] = each.origin
+			orders.orders[build][index] = each.origin
 		}
 	}
-	if state.methodOrders == nil {
-		state.methodOrders = map[*Named][]int{}
-	}
-	state.methodOrders[origin] = order
-	return order, order != nil
+	return orders
 }
 
-// runningChecks counts the variational checks in progress anywhere, reads as one build among them, so a read in a
-// process running none pays one atomic load and nothing more. checksByGoroutine holds each one's state by the
-// goroutine it runs on. readsInBuild counts the reads as one build alone, so a read that answers otherwise only under
-// one (a named type's methods, a scope's names) pays one atomic load while none runs, even in a check.
+// runningChecks counts the variational checks and InBuild reads in progress anywhere, so a read in a process running
+// none pays one atomic load and nothing more. checksByGoroutine holds each one's state by the goroutine it runs on.
+// variationsExist is set once any object differs by build, so a read that answers otherwise only for such an object (a
+// scope's names, a named type's methods) pays one atomic load in a process where none does.
 var (
 	runningChecks     atomic.Int32
 	checksByGoroutine sync.Map // goroutineIdentity() to *variationalState
-	readsInBuild      atomic.Int32
+	variationsExist   atomic.Bool
 )
 
 // runningState is the state of the variational check running on this goroutine, or nil.
@@ -427,13 +461,19 @@ func runningState() *variationalState {
 	return running
 }
 
-// readState is the state a read on check's behalf answers under: check's own when check is given, and the goroutine's
-// when it isn't (a type set computed for an interface whose checker is gone).
+// readState is the state a read on check's behalf answers under: check's own when check is given, and when it isn't
+// (a type set computed for an interface whose checker is gone) the goroutine's, or hostRead for a goroutine with none.
 func (check *Checker) readState() *variationalState {
 	if check != nil {
 		return check.variational
 	}
-	return runningState()
+	if state := runningState(); state != nil {
+		return state
+	}
+	if variationsExist.Load() {
+		return hostRead
+	}
+	return nil
 }
 
 // recordTypes reports whether check records expressions' types: when its Info has a Types map, and always in a
@@ -494,6 +534,18 @@ type resolvedUnderlying struct{ underlying Type }
 
 // variationOf is obj's variation, or nil.
 func variationOf(obj Object) *objectVariation {
+	// The package-level kinds first, by their concrete types, which costs less than asserting an interface on every
+	// Lookup.
+	switch obj := obj.(type) {
+	case *Var:
+		return obj.variation
+	case *Const:
+		return obj.variation
+	case *TypeName:
+		return obj.variation
+	case *Func:
+		return obj.variation
+	}
 	if base, isBase := obj.(interface{ base() *object }); isBase {
 		return base.base().variation
 	}
@@ -506,6 +558,9 @@ func (obj *object) base() *object { return obj }
 func (obj *object) ensureVariation() *objectVariation {
 	if obj.variation == nil {
 		obj.variation = &objectVariation{}
+		if !variationsExist.Load() {
+			variationsExist.Store(true)
+		}
 	}
 	return obj.variation
 }
@@ -554,7 +609,7 @@ func SetMethodIndex(method *Func, builds Mask, index int) {
 // variational check: a merged method's declarations are one method, so each build's index among its type's methods is
 // counted from them, as each build's plain check counts.
 type methodDeclarations struct {
-	bases []*TypeName
+	bases  []*TypeName
 	byBase map[*TypeName][]declaredMethod
 }
 
@@ -797,11 +852,15 @@ func CompleteWithMethods(iface *Interface, methods []*Func) {
 	iface.tset = &_TypeSet{methods: sorted, terms: allTermlist}
 }
 
-// readingState is the state of the variational check running on this goroutine when a read must answer by build,
-// since the check is in a unit, and nil when it needn't.
+// readingState is the state a read must answer by build under: the variational check's running on this goroutine
+// when it is in a unit, an InBuild's, or hostRead on a goroutine running neither. It is nil for a check outside every
+// unit (types.Outside, the merging importer's resolution), whose reads answer as the first build.
 func readingState() *variationalState {
 	state := runningState()
-	if state == nil || state.depth == 0 {
+	if state == nil {
+		return hostRead
+	}
+	if state.depth == 0 {
 		return nil
 	}
 	return state
@@ -817,30 +876,38 @@ func pickObjectVariant(variation *objectVariation) (objectVariant, bool) {
 	if state == nil {
 		return objectVariant{}, false
 	}
-	state.narrowed++
+	state.narrowed.Add(1)
 	mask := state.mask
 	first := -1
-	var parts []Mask
 	for index, variant := range variation.variants {
 		if variant.mask&mask == 0 {
 			continue
 		}
-		parts = append(parts, variant.mask&mask)
-		if first < 0 {
-			first = index
+		if first >= 0 {
+			splitAt(state, answeringParts(variation.variants, mask))
 		}
-	}
-	if len(parts) > 1 {
-		splitAt(state, parts)
+		first = index
 	}
 	if first < 0 {
 		return variation.variants[0], true
 	}
 	if variation.variants[first].mask&mask != mask {
 		// The answer holds in some of the unit's builds and the object is absent in the rest.
-		splitAt(state, parts)
+		splitAt(state, answeringParts(variation.variants, mask))
 	}
 	return variation.variants[first], true
+}
+
+// answeringParts are the groups of mask's builds each of variants answers for, the parts of a split: built only when
+// a read splits, so a read that doesn't allocates nothing.
+func answeringParts(variants []objectVariant, mask Mask) []Mask {
+	var parts []Mask
+	for _, variant := range variants {
+		if builds := variant.mask & mask; builds != 0 {
+			parts = append(parts, builds)
+		}
+	}
+	return parts
 }
 
 // presentHere reports whether an object with variation exists in the current unit's builds: true in all of them,
@@ -879,22 +946,24 @@ func (n *Named) pickVariant() (*namedVariant, *variationalState) {
 	if state == nil {
 		return &variation.variants[0], state
 	}
-	state.narrowed++
+	state.narrowed.Add(1)
 	mask := state.mask
 	first := -1
-	var parts []Mask
 	for index := range variation.variants {
-		builds := variation.variants[index].mask & mask
-		if builds == 0 {
+		if variation.variants[index].mask&mask == 0 {
 			continue
 		}
-		parts = append(parts, builds)
-		if first < 0 {
-			first = index
+		if first >= 0 {
+			// More than one answer holds in the builds: split, building the parts only now.
+			var parts []Mask
+			for each := range variation.variants {
+				if builds := variation.variants[each].mask & mask; builds != 0 {
+					parts = append(parts, builds)
+				}
+			}
+			splitAt(state, parts)
 		}
-	}
-	if len(parts) > 1 {
-		splitAt(state, parts)
+		first = index
 	}
 	if first < 0 {
 		first = 0
@@ -947,7 +1016,7 @@ func (variant *namedVariant) resolved(state *variationalState) Type {
 	}
 	var before uint64
 	if state != nil {
-		before = state.narrowed
+		before = state.narrowed.Load()
 	}
 	var underlying Type
 	switch rhs := Unalias(variant.rhs).(type) {
@@ -958,7 +1027,7 @@ func (variant *namedVariant) resolved(state *variationalState) Type {
 	default:
 		underlying = rhs.Underlying()
 	}
-	if state != nil && state.narrowed == before {
+	if state != nil && state.narrowed.Load() == before {
 		variant.underlying.Store(&resolvedUnderlying{underlying})
 	}
 	return underlying

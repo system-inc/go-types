@@ -20,46 +20,71 @@ func TestVariationalInBuildReadsAsEachBuild(test *testing.T) {
 	for name, fixtures := range projectionFixtures {
 		test.Run(name, func(test *testing.T) {
 			test.Parallel()
-			fileSet := token.NewFileSet()
-			parsed := parseFixture(test, fileSet, fixtures)
-			variation := &types.Variation{Builds: everyBuild, Files: parsed.masks}
-			// A fixture may report errors, as the abandoned errors fixture does; the projection test compares them.
-			checked, _ := (&types.Config{Variation: variation, Importer: fixtureImporter{}, Error: func(error) {}}).
-				Check("fork", fileSet, parsed.files, &types.Info{})
-			everyName := checked.Scope().Names()
 			for _, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
-				plain, _ := (&types.Config{Importer: fixtureImporter{}, Error: func(error) {}}).Check("fork", fileSet,
-					parsed.filesIn(build), &types.Info{})
-				plainNames := plain.Scope().Names()
-				want := map[string]string{}
-				for _, name := range plainNames {
-					want[name] = spellMember(plain.Scope().Lookup(name))
-				}
-				got := map[string]string{}
-				var gotNames []string
-				gotLength := 0
-				types.InBuild(build, func() {
-					gotNames = checked.Scope().Names()
-					gotLength = checked.Scope().Len()
-					for _, name := range everyName {
-						if found := checked.Scope().Lookup(name); found != nil || slices.Contains(plainNames, name) {
-							got[name] = spellMember(found)
-						}
-					}
-				})
-				label := fmt.Sprintf("build %03b", build)
-				compareSpelled(test, label+" package scope", got, want)
-				if !slices.Equal(gotNames, plainNames) || gotLength != len(plainNames) {
-					test.Errorf("%s: Names %v and Len %d, plain Names %v", label, gotNames, gotLength, plainNames)
-				}
+				compareReads(test, fixtures, build, func(work func()) { types.InBuild(build, work) })
 			}
 		})
 	}
 }
 
-// TestVariationalInBuildAnswersTheBuildNotTheHost reads what differs by build in the hard and method order fixtures
-// without InBuild, which answers the host's (darwin's), and under InBuild for windows, which answers windows's: N's
-// value, and WaitStatus's methods, which windows declares two of in its own order.
+// TestVariationalReadsWithNoStateAsTheHost is TestVariationalInBuildReadsAsEachBuild for a read from a goroutine
+// running no check and no InBuild, as a host lint reads: it answers as the host's (darwin's) plain check.
+func TestVariationalReadsWithNoStateAsTheHost(test *testing.T) {
+	test.Parallel()
+	for name, fixtures := range projectionFixtures {
+		test.Run(name, func(test *testing.T) {
+			test.Parallel()
+			compareReads(test, fixtures, buildDarwin, func(work func()) { work() })
+		})
+	}
+}
+
+// compareReads checks fixtures once for every build and requires the package's reads inside read to be build's plain
+// check's: every package-level name of the plain check is found by Lookup with the type, the constant value, the
+// underlying type and the method sets of the plain check's, spelled as the census spells them, no other name is found,
+// and Names and Len are the plain scope's.
+func compareReads(test *testing.T, fixtures []fixtureFile, build types.Mask, read func(work func())) {
+	test.Helper()
+	fileSet := token.NewFileSet()
+	parsed := parseFixture(test, fileSet, fixtures)
+	variation := &types.Variation{Builds: everyBuild, Files: parsed.masks}
+	// A fixture may report errors, as the abandoned errors fixture does; the projection test compares them.
+	checked, _ := (&types.Config{Variation: variation, Importer: fixtureImporter{}, Error: func(error) {}}).
+		Check("fork", fileSet, parsed.files, &types.Info{})
+	var everyName []string
+	types.InBuild(buildDarwin, func() { everyName = append(everyName, checked.Scope().Names()...) })
+	types.InBuild(buildLinux, func() { everyName = append(everyName, checked.Scope().Names()...) })
+	types.InBuild(buildWindows, func() { everyName = append(everyName, checked.Scope().Names()...) })
+	plain, _ := (&types.Config{Importer: fixtureImporter{}, Error: func(error) {}}).Check("fork", fileSet,
+		parsed.filesIn(build), &types.Info{})
+	plainNames := plain.Scope().Names()
+	want := map[string]string{}
+	for _, name := range plainNames {
+		want[name] = spellMember(plain.Scope().Lookup(name))
+	}
+	got := map[string]string{}
+	var gotNames []string
+	gotLength := 0
+	read(func() {
+		gotNames = checked.Scope().Names()
+		gotLength = checked.Scope().Len()
+		for _, name := range everyName {
+			if found := checked.Scope().Lookup(name); found != nil || slices.Contains(plainNames, name) {
+				got[name] = spellMember(found)
+			}
+		}
+	})
+	label := fmt.Sprintf("build %03b", build)
+	compareSpelled(test, label+" package scope", got, want)
+	if !slices.Equal(gotNames, plainNames) || gotLength != len(plainNames) {
+		test.Errorf("%s: Names %v and Len %d, plain Names %v", label, gotNames, gotLength, plainNames)
+	}
+}
+
+// TestVariationalInBuildAnswersTheBuildNotTheHost reads what differs by build in the spike, hard and method order
+// fixtures without InBuild, which answers the host's (darwin's), and under InBuild for windows, which answers
+// windows's: N's value, and WaitStatus's methods, which windows declares two of in its own order. The spike's N is
+// declared first in linux's file, so its first answer is linux's and not the host's.
 func TestVariationalInBuildAnswersTheBuildNotTheHost(test *testing.T) {
 	test.Parallel()
 	for _, read := range []struct {
@@ -70,6 +95,8 @@ func TestVariationalInBuildAnswersTheBuildNotTheHost(test *testing.T) {
 		windows  string
 	}{
 		{hardFiles, "N", func(object types.Object) string { return object.(*types.Const).Val().ExactString() }, "4", "2"},
+		{fixtureFiles, "N", func(object types.Object) string { return object.(*types.Const).Val().ExactString() }, "3",
+			"2"},
 		{methodOrderFiles, "WaitStatus", func(object types.Object) string {
 			named := object.Type().(*types.Named)
 			var methods []string

@@ -115,7 +115,7 @@ type parsedFixture struct {
 	masks map[*ast.File]types.Mask
 }
 
-func parseFixture(t *testing.T, fileSet *token.FileSet, fixtures []fixtureFile) parsedFixture {
+func parseFixture(t testing.TB, fileSet *token.FileSet, fixtures []fixtureFile) parsedFixture {
 	t.Helper()
 	parsed := parsedFixture{masks: map[*ast.File]types.Mask{}}
 	for _, fixture := range fixtures {

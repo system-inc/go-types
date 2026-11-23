@@ -57,8 +57,9 @@ func (s *Scope) Parent() *Scope { return s.parent }
 
 // Len returns the number of scope elements.
 func (s *Scope) Len() int {
-	// cohere's variational spike: read as one build, a name absent from the build is no element.
-	if inBuildState() != nil {
+	// cohere's variational spike: read as one build (InBuild, or the host's with no check), a name absent from the
+	// build is no element.
+	if viewState() != nil {
 		return len(s.Names())
 	}
 	return len(s.elems)
@@ -74,7 +75,7 @@ func (s *Scope) Names() []string {
 	}
 	slices.Sort(names)
 	// cohere's variational spike: read as one build, a name absent from the build is left out.
-	if inBuildState() != nil {
+	if viewState() != nil {
 		names = slices.DeleteFunc(names, func(name string) bool { return s.Lookup(name) == nil })
 	}
 	return names
@@ -90,7 +91,7 @@ func (s *Scope) Child(i int) *Scope { return s.children[i] }
 // object exists; otherwise the result is nil.
 func (s *Scope) Lookup(name string) Object {
 	obj := resolve(name, s.elems[name])
-	if obj != nil && runningChecks.Load() > 0 {
+	if obj != nil && variationsExist.Load() {
 		// cohere's variational spike: an object that exists in only some builds is found in those alone, and another
 		// of the same name may stand in the rest.
 		if !presentHere(variationOf(obj)) {
