@@ -33,6 +33,7 @@ func Import(fset *token.FileSet, universe *Universe, path, srcDir string, lookup
 
 		// No need to re-import if the package was imported completely before.
 		if pkg = universe.Packages[id]; pkg != nil && pkg.Complete() {
+			universe.readWholeIfEager(pkg) // cohere's (whole.go)
 			return
 		}
 		f, err := lookup(path)
@@ -52,6 +53,7 @@ func Import(fset *token.FileSet, universe *Universe, path, srcDir string, lookup
 
 		// no need to re-import if the package was imported completely before
 		if pkg = universe.Packages[id]; pkg != nil && pkg.Complete() {
+			universe.readWholeIfEager(pkg) // cohere's (whole.go)
 			return
 		}
 
@@ -80,6 +82,7 @@ func Import(fset *token.FileSet, universe *Universe, path, srcDir string, lookup
 
 	input := pkgbits.NewPkgDecoder(id, s)
 	pkg = readUnifiedPackage(fset, nil, universe, input)
+	universe.readWholeIfEager(pkg) // cohere's (whole.go)
 
 	return
 }

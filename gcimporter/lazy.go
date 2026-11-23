@@ -18,6 +18,9 @@ import (
 // A Universe is one build's imported packages, by path, and the state of the objects being read on demand in them.
 type Universe struct {
 	Packages map[string]*types.Package
+	// Eager reads each package whole before Import returns it, for callers that check many packages at once over the
+	// universe (whole.go).
+	Eager bool
 	// Elapsed is the time spent reading objects and named types' declarations on demand, after their packages were
 	// imported.
 	Elapsed time.Duration
@@ -32,6 +35,10 @@ type Universe struct {
 	// has its underlying type.
 	later  []func()
 	ifaces []*types.Interface
+
+	// wholePackages and walked are what an eager universe has read whole so far: each package, and each type reached.
+	wholePackages map[*types.Package]bool
+	walked        map[types.Type]bool
 }
 
 // objectKey names a package-level object of a universe.
@@ -43,8 +50,10 @@ type objectKey struct {
 // NewUniverse is an empty universe.
 func NewUniverse() *Universe {
 	return &Universe{
-		Packages: map[string]*types.Package{},
-		aliasing: map[objectKey]bool{},
+		Packages:      map[string]*types.Package{},
+		aliasing:      map[objectKey]bool{},
+		wholePackages: map[*types.Package]bool{},
+		walked:        map[types.Type]bool{},
 	}
 }
 
