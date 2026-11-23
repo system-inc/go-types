@@ -101,7 +101,14 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 				requireUsedParameters(test, label, fileSet, project(info.Defs, overlays.Defs),
 					project(info.Uses, overlays.Uses), plain.Defs, plain.Uses)
 				// What the projection answers is read as the build has it: one interface's type set differs by build.
+				projectedDefs, projectedUses := project(info.Defs, overlays.Defs), project(info.Uses, overlays.Uses)
+				if build == buildDarwin {
+					// The host's projection read with no state, as a host lint reads it.
+					requirePositionsInBuild(test, label+" with no state", fileSet, parsed, build, projectedDefs,
+						projectedUses)
+				}
 				types.InBuild(build, func() {
+					requirePositionsInBuild(test, label, fileSet, parsed, build, projectedDefs, projectedUses)
 					compareSpelled(test, label+" Defs", spellObjects(spelling, project(info.Defs, overlays.Defs)),
 						spellObjects(spelling, plain.Defs))
 					compareSpelled(test, label+" Uses", spellObjects(spelling, project(info.Uses, overlays.Uses)),
@@ -404,6 +411,33 @@ func Body() (string, error) {
 	{"build_darwin.go", buildDarwin, "package fork\n"},
 	{"build_linux.go", buildLinux, "package fork\n"},
 	{"build_windows.go", buildWindows, "package fork\n"},
+}
+
+// requirePositionsInBuild requires each object of the package that the build's projected Defs and Uses name to be at
+// a position in a file the build compiles, read as the reader reads it (under InBuild, or with no state for the host):
+// a name declared in each build's own file is one object, and a build's reader finds the file of its position.
+func requirePositionsInBuild(test *testing.T, label string, fileSet *token.FileSet, parsed parsedFixture,
+	build types.Mask, defs map[*ast.Ident]types.Object, uses map[*ast.Ident]types.Object,
+) {
+	test.Helper()
+	compiled := map[string]bool{}
+	for _, file := range parsed.filesIn(build) {
+		compiled[fileSet.Position(file.Pos()).Filename] = true
+	}
+	reported := map[types.Object]bool{}
+	for _, objects := range []map[*ast.Ident]types.Object{defs, uses} {
+		for ident, object := range objects {
+			if object == nil || object.Pkg() == nil || object.Pkg().Path() != "fork" || !object.Pos().IsValid() ||
+				reported[object] {
+				continue
+			}
+			if position := fileSet.Position(object.Pos()); !compiled[position.Filename] {
+				reported[object] = true
+				test.Errorf("%s: %T %s, named at %s, is at %s, in a file the build doesn't compile", label, object,
+					object.Name(), fileSet.Position(ident.Pos()), position)
+			}
+		}
+	}
 }
 
 // requireUsedParameters requires each parameter the build's projected Defs declare, when the build's plain check

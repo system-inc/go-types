@@ -658,6 +658,9 @@ type splitRequest struct{ parts []Mask }
 // objectVariation is what a package-level object holds when it doesn't hold the same in every build.
 type objectVariation struct {
 	presence Mask            // the builds it exists in; zero for every build
+	// positions are where the object is declared in builds other than its first declaration's: a declaration in
+	// another build's file merged into it, or an alike one folded into it (Pos).
+	positions []maskedPos
 	variants []objectVariant // its answers by build once declared; nil while one answer holds everywhere
 	decls    []declVariant   // a source object declared in more than one file: each declaration and its builds
 	named    *Named          // a type name's one named type, kept across its declarations
@@ -773,6 +776,26 @@ func SetVariants(obj Object, variants []Variant) {
 	if len(collapsed) > 1 {
 		base.ensureVariation().variants = collapsed
 	}
+}
+
+// maskedPos is a position and the builds it holds in.
+type maskedPos struct {
+	builds Mask
+	pos    token.Pos
+}
+
+// positionHere is where obj, with variation, is declared as a read as one build has it (InBuild, or the host's with no
+// check): the declaration of that build when another build's declaration comes first, and pos, its first, otherwise
+// and in a check.
+func positionHere(variation *objectVariation, pos token.Pos) token.Pos {
+	if state := viewState(); state != nil {
+		for _, each := range variation.positions {
+			if each.builds&state.mask != 0 {
+				return each.pos
+			}
+		}
+	}
+	return pos
 }
 
 // maskedIndex is an index and the builds it holds in.
@@ -1603,6 +1626,7 @@ func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) in
 	check.variational.merges++
 	firstVariation.decls = append(firstVariation.decls, declVariant{mask: d.mask, decl: d, iota: iotaOf(obj),
 		rank: uint64(len(check.objMap))<<32 | check.variational.merges})
+	firstVariation.positions = append(firstVariation.positions, maskedPos{d.mask, obj.Pos()})
 	firstVariation.presence |= d.mask
 	if firstVariation.presence == check.variational.all {
 		firstVariation.presence = 0
@@ -1635,6 +1659,7 @@ func (check *Checker) mergeMethodVariant(methods []*Func, method *Func) bool {
 			return false
 		}
 		variation.decls = append(variation.decls, declVariant{mask: d.mask, decl: d})
+		variation.positions = append(variation.positions, maskedPos{d.mask, method.pos})
 		variation.presence |= d.mask
 		if variation.presence == check.variational.all {
 			variation.presence = 0
@@ -1870,7 +1895,7 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 		for _, answer := range answers {
 			for _, kept := range collapsed {
 				if sameAnswer(kept, answer) {
-					check.variational.info.folds.add(answer.typ, kept.typ)
+					check.variational.info.folds.add(answer.typ, kept.typ, answer.mask)
 					break
 				}
 			}

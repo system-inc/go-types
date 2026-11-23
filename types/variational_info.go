@@ -508,8 +508,8 @@ type typeFolds struct {
 	objects map[Object]Object
 }
 
-// add maps what folded declares to what kept declares in its place.
-func (folds *typeFolds) add(folded Type, kept Type) {
+// add maps what folded, an answer in builds, declares to what kept declares in its place.
+func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 	if folded == nil || kept == nil || folded == kept {
 		return
 	}
@@ -521,13 +521,20 @@ func (folds *typeFolds) add(folded Type, kept Type) {
 			folds.objects = map[Object]Object{}
 		}
 		folds.objects[folded] = kept
+		// The kept object stands for the folded one in its builds, and is where the folded one is declared there.
+		if folded.Pos() != kept.Pos() {
+			if base, isBase := kept.(interface{ base() *object }); isBase {
+				variation := base.base().ensureVariation()
+				variation.positions = append(variation.positions, maskedPos{builds, folded.Pos()})
+			}
+		}
 	}
 	tuple := func(folded *Tuple, kept *Tuple) {
 		if folded.Len() != kept.Len() {
 			return
 		}
 		for index := range folded.Len() {
-			folds.add(folded.At(index).typ, kept.At(index).typ)
+			folds.add(folded.At(index).typ, kept.At(index).typ, builds)
 		}
 	}
 	switch folded := folded.(type) {
@@ -535,29 +542,29 @@ func (folds *typeFolds) add(folded Type, kept Type) {
 		if kept, isStruct := kept.(*Struct); isStruct && len(kept.fields) == len(folded.fields) {
 			for index, field := range folded.fields {
 				object(field, kept.fields[index])
-				folds.add(field.typ, kept.fields[index].typ)
+				folds.add(field.typ, kept.fields[index].typ, builds)
 			}
 		}
 	case *Pointer:
 		if kept, isPointer := kept.(*Pointer); isPointer {
-			folds.add(folded.base, kept.base)
+			folds.add(folded.base, kept.base, builds)
 		}
 	case *Slice:
 		if kept, isSlice := kept.(*Slice); isSlice {
-			folds.add(folded.elem, kept.elem)
+			folds.add(folded.elem, kept.elem, builds)
 		}
 	case *Array:
 		if kept, isArray := kept.(*Array); isArray {
-			folds.add(folded.elem, kept.elem)
+			folds.add(folded.elem, kept.elem, builds)
 		}
 	case *Chan:
 		if kept, isChan := kept.(*Chan); isChan {
-			folds.add(folded.elem, kept.elem)
+			folds.add(folded.elem, kept.elem, builds)
 		}
 	case *Map:
 		if kept, isMap := kept.(*Map); isMap {
-			folds.add(folded.key, kept.key)
-			folds.add(folded.elem, kept.elem)
+			folds.add(folded.key, kept.key, builds)
+			folds.add(folded.elem, kept.elem, builds)
 		}
 	case *Signature:
 		if kept, isSignature := kept.(*Signature); isSignature {
@@ -569,12 +576,12 @@ func (folds *typeFolds) add(folded Type, kept Type) {
 			for index, method := range folded.methods {
 				if method.name == kept.methods[index].name {
 					object(method, kept.methods[index])
-					folds.add(method.typ, kept.methods[index].typ)
+					folds.add(method.typ, kept.methods[index].typ, builds)
 				}
 			}
 			if len(kept.embeddeds) == len(folded.embeddeds) {
 				for index := range folded.embeddeds {
-					folds.add(folded.embeddeds[index], kept.embeddeds[index])
+					folds.add(folded.embeddeds[index], kept.embeddeds[index], builds)
 				}
 			}
 		}

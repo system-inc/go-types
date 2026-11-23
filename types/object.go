@@ -109,7 +109,13 @@ type object struct {
 func (obj *object) Parent() *Scope { return obj.parent }
 
 // Pos returns the declaration position of the object's identifier.
-func (obj *object) Pos() token.Pos { return obj.pos }
+func (obj *object) Pos() token.Pos {
+	// cohere's variational spike: read as one build, a name declared in each build's own file is at that build's.
+	if obj.variation != nil && len(obj.variation.positions) > 0 {
+		return positionHere(obj.variation, obj.pos)
+	}
+	return obj.pos
+}
 
 // Pkg returns the package to which the object belongs.
 // The result is nil for labels and objects in the Universe scope.
