@@ -32,6 +32,6 @@ func (slab *Slab[T]) Reset() {
 
 // TestVariationalCheckSplitsABodyWithoutFalseErrors is the projection test over usageFiles, which must check clean.
 func TestVariationalCheckSplitsABodyWithoutFalseErrors(t *testing.T) {
-	// Not parallel: the fork holds a variational check's unit state in package variables, one check at a time.
+	t.Parallel()
 	projectAndCompare(t, usageFiles)
 }

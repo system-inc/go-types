@@ -111,7 +111,7 @@ func answer(tv types.TypeAndValue) string { return canonical.Answer(tv) }
 // TestVariationalCheckProjectsToEachBuild checks the fixture once for every build, then checks each build alone the
 // plain way, and requires every expression's projected answer to be the plain one, in every build.
 func TestVariationalCheckProjectsToEachBuild(t *testing.T) {
-	// Not parallel: the fork holds a variational check's unit state in package variables, one check at a time.
+	t.Parallel()
 	forked := projectAndCompare(t, fixtureFiles)
 	for _, mustNotFork := range []string{"Untouched", "Signal", "Pass", "Size", "WordSize"} {
 		if forked[mustNotFork] {
