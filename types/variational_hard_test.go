@@ -70,6 +70,8 @@ func Switch(value any) int {
 
 func Shift() int { return 1 << N }
 
+func Mapped() *Inner { return mapper }
+
 // UseKinds' last constant is declared first, through a type, as internal/go_engine/build_reads/use_kinds.go's
 // usedKindsEnd is: the group's shared 1 << iota then ends on UsedConstant in a plain check, not on the last constant.
 type UseKinds uint8
@@ -104,6 +106,10 @@ const N = 4
 type Inner struct{ Value uint32 }
 
 func pair() (Word, Word) { return 1, 2 }
+
+// mapper is declared with an initializer in each build's file, as golang.org/x/sys/unix's mapper is in mremap.go
+// and mmap_nomremap.go.
+var mapper = &Inner{Value: 1}
 `},
 	{"windows.go", buildWindows, `package fork
 
@@ -130,6 +136,8 @@ const N = 2
 type Inner struct{ Value uint16 }
 
 func pair() (Word, Word) { return 3, 4 }
+
+var mapper = &Inner{Value: 2}
 `},
 }
 
