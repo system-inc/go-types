@@ -31,6 +31,7 @@ var projectionFixtures = map[string][]fixtureFile{
 	"pairs":             pairFiles,
 	"defined over":      definedOverFiles,
 	"field methods":     fieldMethodFiles,
+	"closures":          closureFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
@@ -44,7 +45,8 @@ var projectionFixtures = map[string][]fixtureFile{
 // type arguments and type, expressions' types and values as the census spells them, scopes by the names they declare
 // and the object each name is, the initialization order initializer for initializer, each by its variables and its
 // expression's place, and the package's imports by path, in order. The variational check's diagnostics whose builds
-// hold each build are that build's plain diagnostics.
+// hold each build are that build's plain diagnostics. And each build's projection names only objects it declares
+// (requireDeclaredObjects), which spellings can't tell: a use of another run's object spells as the build's own.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
 	for name, fixtures := range projectionFixtures {
@@ -87,6 +89,11 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 					overlaid += overlays.Len()
 				}
 				label := fmt.Sprintf("build %03b", build)
+				requireDeclaredObjects(test, label+" plain", fileSet, plain.Defs, plain.Uses, plain.Implicits,
+					plain.Selections, plain.Scopes)
+				requireDeclaredObjects(test, label, fileSet, project(info.Defs, overlays.Defs),
+					project(info.Uses, overlays.Uses), project(info.Implicits, overlays.Implicits),
+					project(info.Selections, overlays.Selections), project(info.Scopes, overlays.Scopes))
 				// What the projection answers is read as the build has it: one interface's type set differs by build.
 				types.InBuild(build, func() {
 					compareSpelled(test, label+" Defs", spellObjects(spelling, project(info.Defs, overlays.Defs)),
@@ -282,6 +289,89 @@ import (
 	_ "example/beta"
 )
 `},
+}
+
+// closureFiles declare a function whose body splits by build, at a constant whose value differs by build, declaring
+// a closure that reads the constant, and using it before and after the split point and inside nested func literals.
+var closureFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+func Runner() int {
+	run := func() int { return N }
+	first := run()
+	inner := func() int {
+		nested := func() int { return run() + N }
+		return nested() + run()
+	}
+	if N > 1 {
+		first += run()
+	}
+	return first + inner() + run()
+}
+
+func apply(work func(int) int, value int) int { return work(value) }
+
+func Cases() (total int) {
+	for _, value := range []int{1, 2} {
+		run := func(each int) int { return each * N }
+		total += apply(run, value)
+		defer func() { total += run(value) }()
+	}
+	check := func() bool { return total > N }
+	if !check() {
+		total++
+	}
+	return total
+}
+`},
+	{"n_darwin.go", buildDarwin, "package fork\n\nconst N = 1\n"},
+	{"n_linux.go", buildLinux, "package fork\n\nconst N = 2\n"},
+	{"n_windows.go", buildWindows, "package fork\n\nconst N = 3\n"},
+}
+
+// requireDeclaredObjects requires each object that uses, implicits, selections and scopes name, when it is declared
+// in the package's own files, to be one that defs or implicits declare: a build's answers name its own objects, never
+// another run's. A field or method of an instance is its origin's.
+func requireDeclaredObjects(test *testing.T, label string, fileSet *token.FileSet, defs map[*ast.Ident]types.Object,
+	uses map[*ast.Ident]types.Object, implicits map[ast.Node]types.Object,
+	selections map[*ast.SelectorExpr]*types.Selection, scopes map[ast.Node]*types.Scope,
+) {
+	test.Helper()
+	declared := map[types.Object]bool{}
+	for _, object := range defs {
+		declared[object] = true
+	}
+	for _, object := range implicits {
+		declared[object] = true
+	}
+	require := func(where string, object types.Object) {
+		switch origin := object.(type) {
+		case *types.Var:
+			object = origin.Origin()
+		case *types.Func:
+			object = origin.Origin()
+		}
+		if object == nil || object.Pkg() == nil || object.Pkg().Path() != "fork" || !object.Pos().IsValid() ||
+			declared[object] {
+			return
+		}
+		test.Errorf("%s: %s names %s %s declared at %s, which no Defs or Implicits entry declares", label, where,
+			fmt.Sprintf("%T", object), object.Name(), fileSet.Position(object.Pos()))
+	}
+	for ident, object := range uses {
+		require("the use at "+fileSet.Position(ident.Pos()).String(), object)
+	}
+	for node, object := range implicits {
+		require("the implicit at "+fileSet.Position(node.Pos()).String(), object)
+	}
+	for selector, selection := range selections {
+		require("the selection at "+fileSet.Position(selector.Pos()).String(), selection.Obj())
+	}
+	for node, scope := range scopes {
+		for _, name := range scope.Names() {
+			require("the scope at "+fileSet.Position(node.Pos()).String(), scope.Lookup(name))
+		}
+	}
 }
 
 // fullInfo is an Info with every map that varies by build.

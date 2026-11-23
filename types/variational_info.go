@@ -206,6 +206,27 @@ func (log *infoAnswers[K, V]) covering(key K, builds Mask) (V, bool) {
 	return log.staged[key].covering(builds)
 }
 
+// remap replaces each answer that by answers otherwise, in the caller's map and among the staged answers. It runs
+// as the check ends, when no undo reads the answers again, so it changes them in place.
+func (log *infoAnswers[K, V]) remap(by func(V) (V, bool)) {
+	for key, value := range log.plain {
+		if replaced, changed := by(value); changed {
+			log.plain[key] = replaced
+		}
+	}
+	for key, answers := range log.staged {
+		if replaced, changed := by(answers.first.value); changed {
+			answers.first.value = replaced
+			log.staged[key] = answers
+		}
+		for index := range answers.more {
+			if replaced, changed := by(answers.more[index].value); changed {
+				answers.more[index].value = replaced
+			}
+		}
+	}
+}
+
 // rollback puts back every write after mark.
 func (log *infoAnswers[K, V]) rollback(mark int) {
 	for index := len(log.undo) - 1; index >= mark; index-- {
@@ -296,6 +317,8 @@ type infoLogs struct {
 	scopes     infoAnswers[ast.Node, *Scope]
 	// initOrders are each build's initialization order where it isn't the host's (initOrderByBuild).
 	initOrders [8][]*Initializer
+	// folds are the objects and scopes a folded answer's type declares, each with the kept answer's in its place.
+	folds typeFolds
 	// functionNodes are the node each function's scope is recorded for, so a body that runs again records its own
 	// scope there (bodyScope).
 	functionNodes map[*Scope]ast.Node
@@ -377,6 +400,7 @@ func (check *Checker) endInfo() {
 		variation.Overlays[build].InitOrder = order
 	}
 	sameObject := func(left Object, right Object) bool { return left == right }
+	logs.folds.apply(logs)
 	if check.Types != nil {
 		logs.types.project(all, func(build int) *Overlay[ast.Expr, TypeAndValue] {
 			return &variation.Overlays[build].Types
@@ -429,6 +453,109 @@ func sameTypeAndValue(left TypeAndValue, right TypeAndValue) bool {
 	}
 	return left.Value == nil ||
 		left.Value.Kind() == right.Value.Kind() && left.Value.ExactString() == right.Value.ExactString()
+}
+
+// typeFolds map what an answer folded into an alike answer of another run declares (its fields, an interface's
+// methods) to what the kept answer declares in its place. Identical types have one shape, so the two are walked side
+// by side. A function type's parameters stay each run's own: nothing but their own declaration and their function
+// type's scope names them, and identical signatures may name them otherwise.
+type typeFolds struct {
+	objects map[Object]Object
+}
+
+// add maps what folded declares to what kept declares in its place.
+func (folds *typeFolds) add(folded Type, kept Type) {
+	if folded == nil || kept == nil || folded == kept {
+		return
+	}
+	object := func(folded Object, kept Object) {
+		if folded == kept || folded == nil || kept == nil {
+			return
+		}
+		if folds.objects == nil {
+			folds.objects = map[Object]Object{}
+		}
+		folds.objects[folded] = kept
+	}
+	tuple := func(folded *Tuple, kept *Tuple) {
+		if folded.Len() != kept.Len() {
+			return
+		}
+		for index := range folded.Len() {
+			folds.add(folded.At(index).typ, kept.At(index).typ)
+		}
+	}
+	switch folded := folded.(type) {
+	case *Struct:
+		if kept, isStruct := kept.(*Struct); isStruct && len(kept.fields) == len(folded.fields) {
+			for index, field := range folded.fields {
+				object(field, kept.fields[index])
+				folds.add(field.typ, kept.fields[index].typ)
+			}
+		}
+	case *Pointer:
+		if kept, isPointer := kept.(*Pointer); isPointer {
+			folds.add(folded.base, kept.base)
+		}
+	case *Slice:
+		if kept, isSlice := kept.(*Slice); isSlice {
+			folds.add(folded.elem, kept.elem)
+		}
+	case *Array:
+		if kept, isArray := kept.(*Array); isArray {
+			folds.add(folded.elem, kept.elem)
+		}
+	case *Chan:
+		if kept, isChan := kept.(*Chan); isChan {
+			folds.add(folded.elem, kept.elem)
+		}
+	case *Map:
+		if kept, isMap := kept.(*Map); isMap {
+			folds.add(folded.key, kept.key)
+			folds.add(folded.elem, kept.elem)
+		}
+	case *Signature:
+		if kept, isSignature := kept.(*Signature); isSignature {
+			tuple(folded.params, kept.params)
+			tuple(folded.results, kept.results)
+		}
+	case *Interface:
+		if kept, isInterface := kept.(*Interface); isInterface && len(kept.methods) == len(folded.methods) {
+			for index, method := range folded.methods {
+				if method.name == kept.methods[index].name {
+					object(method, kept.methods[index])
+					folds.add(method.typ, kept.methods[index].typ)
+				}
+			}
+			if len(kept.embeddeds) == len(folded.embeddeds) {
+				for index := range folded.embeddeds {
+					folds.add(folded.embeddeds[index], kept.embeddeds[index])
+				}
+			}
+		}
+	}
+}
+
+// apply names the kept answer's objects in every Info answer that names a folded answer's.
+func (folds *typeFolds) apply(logs *infoLogs) {
+	if len(folds.objects) == 0 {
+		return
+	}
+	object := func(value Object) (Object, bool) {
+		kept, folded := folds.objects[value]
+		return kept, folded
+	}
+	logs.defs.remap(object)
+	logs.uses.remap(object)
+	logs.selections.remap(func(selection *Selection) (*Selection, bool) {
+		kept, folded := folds.objects[selection.obj]
+		if !folded {
+			return selection, false
+		}
+		remapped := *selection
+		remapped.obj = kept
+		return &remapped, true
+	})
 }
 
 // sameSelection reports whether two selections answer alike: one kind, one object reached the same way, and receivers

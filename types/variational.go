@@ -1864,6 +1864,18 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 	for _, answer := range answers {
 		collapsed = appendVariant(collapsed, answer)
 	}
+	// An answer folded into an alike one of another run declares objects of its own (a struct's fields), which no
+	// read answers with: the kept answer's stand in for them.
+	if _, isFunc := obj.(*Func); !isFunc {
+		for _, answer := range answers {
+			for _, kept := range collapsed {
+				if sameAnswer(kept, answer) {
+					check.variational.info.folds.add(answer.typ, kept.typ)
+					break
+				}
+			}
+		}
+	}
 	if isDefinedType {
 		named := variation.named
 		if named != nil && len(collapsed) > 1 {
