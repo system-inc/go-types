@@ -805,7 +805,7 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 				answers = append(answers, objectVariant{mask: builds, typ: obj.typ, val: obj.val})
 			case *Var:
 				check.decl = declared.decl
-				check.varDecl(obj, declared.decl.lhs, declared.decl.vtyp, declared.decl.init)
+				check.varDecl(obj, check.mergedLeftSide(declared.decl.lhs), declared.decl.vtyp, declared.decl.init)
 				answers = append(answers, objectVariant{mask: builds, typ: obj.typ})
 				for _, sibling := range siblings {
 					siblingAnswers[sibling] = append(siblingAnswers[sibling], objectVariant{mask: builds, typ: sibling.typ})
@@ -944,4 +944,22 @@ func (check *Checker) rewriteCommaOk(x ast.Expr, t0 Type, t1 Type) {
 		}
 		x = parenthesized.X
 	}
+}
+
+// mergedLeftSide is a variable declaration's left side with each variable replaced by the package-level object of its
+// name. Another build's declaration, merged into the name's first object, names its own file's variables on its left,
+// which were folded away, and the declaration now declares the merged ones (golang.org/x/sys/unix's mapper, declared
+// with an initializer in mremap.go and in mmap_nomremap.go).
+func (check *Checker) mergedLeftSide(lhs []*Var) []*Var {
+	if len(lhs) == 0 {
+		return lhs
+	}
+	merged := make([]*Var, len(lhs))
+	for index, variable := range lhs {
+		merged[index] = variable
+		if first, isVariable := check.pkg.scope.elems[variable.name].(*Var); isVariable {
+			merged[index] = first
+		}
+	}
+	return merged
 }
