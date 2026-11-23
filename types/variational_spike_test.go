@@ -101,10 +101,17 @@ const Separator = '/'
 `},
 }
 
-// unsafeImporter imports unsafe, the fixture's one import.
-type unsafeImporter struct{}
+// fixtureImporter imports unsafe, and any other path as an empty package of its own, which a fixture imports blank.
+type fixtureImporter struct{}
 
-func (unsafeImporter) Import(path string) (*types.Package, error) { return types.Unsafe, nil }
+func (fixtureImporter) Import(path string) (*types.Package, error) {
+	if path == "unsafe" {
+		return types.Unsafe, nil
+	}
+	imported := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
+	imported.MarkComplete()
+	return imported, nil
+}
 
 // answer spells a recorded type and value as the census compares them.
 func answer(tv types.TypeAndValue) string { return canonical.Answer(tv) }
@@ -153,7 +160,7 @@ func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diag
 		masks[parsed] = fixture.builds
 	}
 	variation := &types.Variation{Builds: everyBuild, Files: masks}
-	configuration := &types.Config{Variation: variation, Importer: unsafeImporter{}}
+	configuration := &types.Config{Variation: variation, Importer: fixtureImporter{}}
 	var published []types.Error
 	if diagnosing {
 		configuration.Error = func(diagnostic error) { published = append(published, diagnostic.(types.Error)) }
@@ -197,7 +204,7 @@ func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diag
 			}
 		}
 		plain := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
-		plainConfiguration := &types.Config{Importer: unsafeImporter{}}
+		plainConfiguration := &types.Config{Importer: fixtureImporter{}}
 		if diagnosing {
 			plainConfiguration.Error = func(diagnostic error) {
 				plainDiagnostics[build] = append(plainDiagnostics[build], diagnostic.Error())

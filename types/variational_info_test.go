@@ -24,6 +24,7 @@ var projectionFixtures = map[string][]fixtureFile{
 	"kinds":            kindFiles,
 	"scopes":           scopeFiles,
 	"init order":       initOrderFiles,
+	"imports":          importFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
@@ -35,9 +36,9 @@ var projectionFixtures = map[string][]fixtureFile{
 // is one object for all of them, at its first declaration, and declarations alike across builds fold into one, as the
 // model has it (variational.go). Selections compare by kind, index, indirection and object, and instances by their
 // type arguments and type, expressions' types and values as the census spells them, scopes by the names they declare
-// and the object each name is, and the initialization order initializer for initializer, each by its variables and
-// its expression's place. The variational check's diagnostics whose builds hold each build are that build's plain
-// diagnostics.
+// and the object each name is, the initialization order initializer for initializer, each by its variables and its
+// expression's place, and the package's imports by path, in order. The variational check's diagnostics whose builds
+// hold each build are that build's plain diagnostics.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
 	for name, fixtures := range projectionFixtures {
@@ -51,9 +52,10 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			// checks' rather than refused.
 			var published []types.Error
 			plainDiagnostics := map[types.Mask][]string{}
-			if _, checkError := (&types.Config{Variation: variation, Importer: unsafeImporter{},
+			checked, checkError := (&types.Config{Variation: variation, Importer: fixtureImporter{},
 				Error: func(diagnostic error) { published = append(published, diagnostic.(types.Error)) }}).Check(
-				"fork", fileSet, parsed.files, info); checkError != nil && len(published) == 0 {
+				"fork", fileSet, parsed.files, info)
+			if checkError != nil && len(published) == 0 {
 				test.Fatalf("variational check: %v", checkError)
 			}
 			overlaid := 0
@@ -64,10 +66,10 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			for index, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
 				spelling.build = build
 				plain := fullInfo()
-				if _, checkError := (&types.Config{Importer: unsafeImporter{}, Error: func(diagnostic error) {
+				plainPackage, checkError := (&types.Config{Importer: fixtureImporter{}, Error: func(diagnostic error) {
 					plainDiagnostics[build] = append(plainDiagnostics[build], diagnostic.Error())
-				}}).Check("fork", fileSet, parsed.filesIn(build), plain); checkError != nil &&
-					len(plainDiagnostics[build]) == 0 {
+				}}).Check("fork", fileSet, parsed.filesIn(build), plain)
+				if checkError != nil && len(plainDiagnostics[build]) == 0 {
 					test.Fatalf("plain check of build %03b: %v", build, checkError)
 				}
 				if len(plain.Defs) == 0 || len(plain.Uses) == 0 {
@@ -101,6 +103,13 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 				}
 				if got, want := spelling.initOrder(initOrder), spelling.initOrder(plain.InitOrder); got != want {
 					test.Errorf("%s InitOrder: projected\n\t%s\nplain\n\t%s", label, got, want)
+				}
+				imports := checked.Imports()
+				if overlays.Imports != nil {
+					imports = overlays.Imports
+				}
+				if got, want := importPaths(imports), importPaths(plainPackage.Imports()); got != want {
+					test.Errorf("%s Imports: projected %s, plain %s", label, got, want)
 				}
 			}
 			compareDiagnostics(test, published, plainDiagnostics)
@@ -234,6 +243,34 @@ type Slot = slotWindows
 `},
 }
 
+// importFiles import a package in a file every build compiles and others in each build's own file, in another order
+// on windows, which alone imports delta: each build's imports are its plain check's, in the order its files meet them.
+var importFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+import _ "example/one"
+
+var Value = 1
+
+var Other = Value
+`},
+	{"imports_unix.go", buildDarwin | buildLinux, `package fork
+
+import (
+	_ "example/beta"
+	_ "example/gamma"
+)
+`},
+	{"imports_windows.go", buildWindows, `package fork
+
+import (
+	_ "example/gamma"
+	_ "example/delta"
+	_ "example/beta"
+)
+`},
+}
+
 // fullInfo is an Info with every map that varies by build.
 func fullInfo() *types.Info {
 	return &types.Info{
@@ -344,6 +381,15 @@ func (spelling objectSpelling) initOrder(order []*types.Initializer) string {
 			nodeKey(spelling.fileSet, initializer.Rhs)))
 	}
 	return strings.Join(initializers, "\n\t")
+}
+
+// importPaths spells a package's imports by their paths, in order.
+func importPaths(imports []*types.Package) string {
+	var paths []string
+	for _, imported := range imports {
+		paths = append(paths, imported.Path())
+	}
+	return "[" + strings.Join(paths, " ") + "]"
 }
 
 func spellInstances(fileSet *token.FileSet, instances map[*ast.Ident]types.Instance) map[string]string {

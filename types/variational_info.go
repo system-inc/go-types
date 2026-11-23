@@ -53,6 +53,9 @@ type BuildOverlays struct {
 	// InitOrder is the build's whole initialization order when it isn't the host's, which Info.InitOrder holds, and
 	// nil when it is.
 	InitOrder []*Initializer
+	// Imports are the build's imports, in the order its files meet them, when they aren't the host's, which the
+	// checked package's Imports holds, and nil when they are.
+	Imports []*Package
 }
 
 // Len is how many answers of every map the build has that differ from the host's.

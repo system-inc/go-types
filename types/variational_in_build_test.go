@@ -24,11 +24,11 @@ func TestVariationalInBuildReadsAsEachBuild(test *testing.T) {
 			parsed := parseFixture(test, fileSet, fixtures)
 			variation := &types.Variation{Builds: everyBuild, Files: parsed.masks}
 			// A fixture may report errors, as the abandoned errors fixture does; the projection test compares them.
-			checked, _ := (&types.Config{Variation: variation, Importer: unsafeImporter{}, Error: func(error) {}}).
+			checked, _ := (&types.Config{Variation: variation, Importer: fixtureImporter{}, Error: func(error) {}}).
 				Check("fork", fileSet, parsed.files, &types.Info{})
 			everyName := checked.Scope().Names()
 			for _, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
-				plain, _ := (&types.Config{Importer: unsafeImporter{}, Error: func(error) {}}).Check("fork", fileSet,
+				plain, _ := (&types.Config{Importer: fixtureImporter{}, Error: func(error) {}}).Check("fork", fileSet,
 					parsed.filesIn(build), &types.Info{})
 				plainNames := plain.Scope().Names()
 				want := map[string]string{}
@@ -82,7 +82,7 @@ func TestVariationalInBuildAnswersTheBuildNotTheHost(test *testing.T) {
 		fileSet := token.NewFileSet()
 		parsed := parseFixture(test, fileSet, read.fixtures)
 		checked, checkError := (&types.Config{Variation: &types.Variation{Builds: everyBuild, Files: parsed.masks},
-			Importer: unsafeImporter{}}).Check("fork", fileSet, parsed.files, &types.Info{})
+			Importer: fixtureImporter{}}).Check("fork", fileSet, parsed.files, &types.Info{})
 		if checkError != nil {
 			test.Fatal(checkError)
 		}

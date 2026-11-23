@@ -170,6 +170,34 @@ type variationalState struct {
 	// errorBuilds, when set, are the builds an error reported outside every unit holds in: initOrderByBuild's, which
 	// reports an initialization cycle for each build it orders.
 	errorBuilds Mask
+	// imports are each build's imports, in the order its files meet them (noteImport).
+	imports [8][]*Package
+}
+
+// noteImport adds imported to the imports of each of builds that hasn't met it yet.
+func (state *variationalState) noteImport(imported *Package, builds Mask) {
+	for build := range 8 {
+		if builds&(1<<build) != 0 && !slices.Contains(state.imports[build], imported) {
+			state.imports[build] = append(state.imports[build], imported)
+		}
+	}
+}
+
+// endImports gives the checked package the host's (build 0's) imports, and each other build whose imports differ its
+// own in its overlay, as each build's plain check lists them.
+func (check *Checker) endImports() {
+	state := check.variational
+	if state.all&1 == 0 {
+		return
+	}
+	host := state.imports[0]
+	check.pkg.imports = host
+	for build := 1; build < 8; build++ {
+		if state.all&(1<<build) != 0 && !slices.Equal(state.imports[build], host) {
+			// An overlay's imports are nil only when they are the host's, so an empty list is kept empty.
+			state.variation.Overlays[build].Imports = append([]*Package{}, state.imports[build]...)
+		}
+	}
 }
 
 // depUndo is what one dependency write replaced, so a unit that restarts can put it back.
@@ -1162,6 +1190,10 @@ func (check *Checker) startVariational() bool {
 	check.variational = &variationalState{all: variation.Builds, mask: variation.Builds, variation: variation}
 	check.variational.register()
 	check.startInfo()
+	// A package checked before, from other files, keeps the imports they met, in every build.
+	for build := range 8 {
+		check.variational.imports[build] = slices.Clone(check.pkg.imports)
+	}
 	check.recordOrder = unordered
 	return true
 }
@@ -1171,6 +1203,7 @@ func (check *Checker) endVariational() {
 	check.vundo = nil
 	check.pendingErrors = nil
 	check.endInfo()
+	check.endImports()
 	check.variational.unregister()
 	check.variational = nil
 }

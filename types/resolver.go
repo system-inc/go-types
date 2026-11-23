@@ -310,6 +310,10 @@ func (check *Checker) collectObjects() {
 					pkgImports[imp] = true
 					pkg.imports = append(pkg.imports, imp)
 				}
+				// cohere's variational spike: each build's imports are kept in the order its own files meet them.
+				if check.variational != nil {
+					check.variational.noteImport(imp, fileMask)
+				}
 
 				pkgName := NewPkgName(d.spec.Pos(), pkg, name, imp)
 				if d.spec.Name != nil {

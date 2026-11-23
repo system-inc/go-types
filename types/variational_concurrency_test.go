@@ -155,7 +155,7 @@ func TestVariationalChecksRunAtOnce(t *testing.T) {
 	}
 
 	dependencyVariation := &types.Variation{Builds: everyBuild, Files: dependency.masks}
-	dependencyPackage, dependencyError := (&types.Config{Variation: dependencyVariation, Importer: unsafeImporter{}}).
+	dependencyPackage, dependencyError := (&types.Config{Variation: dependencyVariation, Importer: fixtureImporter{}}).
 		Check("dep", fileSet, dependency.files, &types.Info{})
 	if dependencyError != nil {
 		t.Fatalf("variational check of dep: %v", dependencyError)
@@ -202,7 +202,7 @@ func TestVariationalChecksRunAtOnce(t *testing.T) {
 	}
 
 	for _, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
-		plainDependency, plainError := (&types.Config{Importer: unsafeImporter{}}).Check("dep", fileSet,
+		plainDependency, plainError := (&types.Config{Importer: fixtureImporter{}}).Check("dep", fileSet,
 			dependency.filesIn(build), &types.Info{})
 		if plainError != nil {
 			t.Fatalf("plain check of dep, build %03b: %v", build, plainError)
