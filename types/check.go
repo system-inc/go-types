@@ -191,6 +191,10 @@ func (check *Checker) addDeclDep(to Object) {
 		return // to is not a package-level object
 	}
 	from.addDep(to)
+	// cohere's variational spike: a variational check keeps the builds each dependency is found in.
+	if check.variational != nil {
+		check.addVariationalDep(from, to)
+	}
 }
 
 func (check *Checker) rememberUntyped(e ast.Expr, lhs bool, mode operandMode, typ *Basic, val constant.Value) {

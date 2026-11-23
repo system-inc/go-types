@@ -23,6 +23,7 @@ var projectionFixtures = map[string][]fixtureFile{
 	"generic types":    genericDefinitionFiles,
 	"kinds":            kindFiles,
 	"scopes":           scopeFiles,
+	"init order":       initOrderFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
@@ -33,9 +34,10 @@ var projectionFixtures = map[string][]fixtureFile{
 // file only some builds compile compares only as being in such a file, since a name declared in each build's own file
 // is one object for all of them, at its first declaration, and declarations alike across builds fold into one, as the
 // model has it (variational.go). Selections compare by kind, index, indirection and object, and instances by their
-// type arguments and type, expressions' types and values as the census spells them, and scopes by the names they
-// declare and the object each name is. The variational check's diagnostics whose builds hold each build are that
-// build's plain diagnostics.
+// type arguments and type, expressions' types and values as the census spells them, scopes by the names they declare
+// and the object each name is, and the initialization order initializer for initializer, each by its variables and
+// its expression's place. The variational check's diagnostics whose builds hold each build are that build's plain
+// diagnostics.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
 	for name, fixtures := range projectionFixtures {
@@ -93,6 +95,13 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 				compareTypes(test, fileSet, label+" Types", project(info.Types, overlays.Types), plain.Types)
 				compareSpelled(test, label+" Scopes", spelling.scopes(project(info.Scopes, overlays.Scopes)),
 					spelling.scopes(plain.Scopes))
+				initOrder := info.InitOrder
+				if overlays.InitOrder != nil {
+					initOrder = overlays.InitOrder
+				}
+				if got, want := spelling.initOrder(initOrder), spelling.initOrder(plain.InitOrder); got != want {
+					test.Errorf("%s InitOrder: projected\n\t%s\nplain\n\t%s", label, got, want)
+				}
 			}
 			compareDiagnostics(test, published, plainDiagnostics)
 			// Every fixture's builds declare things in files of their own, so some answers differ from the host's.
@@ -156,6 +165,73 @@ type Word = uint64
 var _ = unsafe.Sizeof(0)
 `},
 	{"word_windows.go", buildWindows, "package fork\n\ntype Word = uint32\n"},
+}
+
+// initOrderFiles declare variables whose initializers depend on each other differently by build: A reads B on darwin
+// and linux and nothing on windows, Width reads C or B, Picked reads a function whose body reads a constant on darwin
+// and linux and a variable that reads D on windows, and OnlyWindows exists on windows alone. Routed reads a function
+// whose body calls the method of each build's own Slot: First on darwin and linux, Second on windows, though every
+// build declares both, so the edge to First holds on darwin and linux alone. Each build's order is its plain check's.
+var initOrderFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+var D = A + E
+
+var B = C
+
+var C = 2
+
+var Picked = pick()
+
+func pick() int { return Value }
+
+var Sized = Width + 1
+
+var Routed = route()
+
+var First = Second + 1
+
+var Second = 2
+
+type slotUnix struct{}
+
+func (slotUnix) value() int { return First }
+
+type slotWindows struct{}
+
+func (slotWindows) value() int { return Second }
+
+func route() int {
+	var slot Slot
+	return slot.value()
+}
+`},
+	{"order_unix.go", buildDarwin | buildLinux, `package fork
+
+var E = 1
+
+var A = B + 1
+
+const Value = 1
+
+var Width = C
+
+type Slot = slotUnix
+`},
+	{"order_windows.go", buildWindows, `package fork
+
+var A = 1
+
+var OnlyWindows = D
+
+var Value = D + 1
+
+var E = Width
+
+var Width = B
+
+type Slot = slotWindows
+`},
 }
 
 // fullInfo is an Info with every map that varies by build.
@@ -254,6 +330,20 @@ func (spelling objectSpelling) scopes(scopes map[ast.Node]*types.Scope) map[stri
 		spelled[nodeKey(spelling.fileSet, node)] = strings.Join(names, "; ")
 	}
 	return spelled
+}
+
+// initOrder spells an initialization order, each initializer by its variables and its expression's place.
+func (spelling objectSpelling) initOrder(order []*types.Initializer) string {
+	var initializers []string
+	for _, initializer := range order {
+		var variables []string
+		for _, variable := range initializer.Lhs {
+			variables = append(variables, spelling.object(variable))
+		}
+		initializers = append(initializers, fmt.Sprintf("%s = %s", strings.Join(variables, ", "),
+			nodeKey(spelling.fileSet, initializer.Rhs)))
+	}
+	return strings.Join(initializers, "\n\t")
 }
 
 func spellInstances(fileSet *token.FileSet, instances map[*ast.Ident]types.Instance) map[string]string {

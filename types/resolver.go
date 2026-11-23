@@ -31,6 +31,8 @@ type declInfo struct {
 
 	// The deps field tracks initialization expression dependencies.
 	deps map[Object]bool // lazily initialized
+	// cohere's variational spike: in a variational check, the builds whose runs found each of deps (initOrderByBuild)
+	depBuilds map[Object]Mask
 }
 
 // hasInitializer reports whether the declared object has an initialization

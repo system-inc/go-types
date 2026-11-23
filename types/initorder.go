@@ -22,16 +22,36 @@ func (check *Checker) initOrder() {
 	// built from several calls to (*Checker).Files. Clear it.
 	check.Info.InitOrder = check.Info.InitOrder[:0]
 
+	// cohere's variational spike: each build's order is computed over its own declarations and dependencies.
+	if check.variational != nil {
+		check.initOrderByBuild()
+		return
+	}
+	check.Info.InitOrder = check.initOrderOf(check.objMap, check.Info.InitOrder, nil)
+}
+
+// initOrderOf appends to order the initialization order of the package variables of objMap, and returns it. rank,
+// when given, is each object's place in source order (cohere's variational spike: initOrder's own body, over one
+// build's declarations and in that build's order, when a variational check computes each build's).
+func (check *Checker) initOrderOf(objMap map[Object]*declInfo, order []*Initializer,
+	rank func(dependency) uint64,
+) []*Initializer {
 	// Compute the object dependency graph and initialize
 	// a priority queue with the list of graph nodes.
-	pq := nodeQueue(dependencyGraph(check.objMap))
+	pq := nodeQueue(dependencyGraph(objMap))
+	for _, n := range pq {
+		n.rank = uint64(n.obj.order())
+		if rank != nil {
+			n.rank = rank(n.obj)
+		}
+	}
 	heap.Init(&pq)
 
 	const debug = false
 	if debug {
 		fmt.Printf("Computing initialization order for %s\n\n", check.pkg)
 		fmt.Println("Object dependency graph:")
-		for obj, d := range check.objMap {
+		for obj, d := range objMap {
 			// only print objects that may appear in the dependency graph
 			if obj, _ := obj.(dependency); obj != nil {
 				if len(d.deps) > 0 {
@@ -76,7 +96,7 @@ func (check *Checker) initOrder() {
 
 		// if n still depends on other nodes, we have a cycle
 		if n.ndeps > 0 {
-			cycle := findPath(check.objMap, n.obj, n.obj, make(map[Object]bool))
+			cycle := findPath(objMap, n.obj, n.obj, make(map[Object]bool))
 			// If n.obj is not part of the cycle (e.g., n.obj->b->c->d->c),
 			// cycle will be nil. Don't report anything in that case since
 			// the cycle is reported when the algorithm gets to an object
@@ -102,7 +122,7 @@ func (check *Checker) initOrder() {
 
 		// record the init order for variables with initializers only
 		v, _ := n.obj.(*Var)
-		info := check.objMap[v]
+		info := objMap[v]
 		if v == nil || !info.hasInitializer() {
 			continue
 		}
@@ -121,17 +141,18 @@ func (check *Checker) initOrder() {
 			infoLhs = []*Var{v}
 		}
 		init := &Initializer{infoLhs, info.init}
-		check.Info.InitOrder = append(check.Info.InitOrder, init)
+		order = append(order, init)
 	}
 
 	if debug {
 		fmt.Println()
 		fmt.Println("Initialization order:")
-		for _, init := range check.Info.InitOrder {
+		for _, init := range order {
 			fmt.Printf("\t%s\n", init)
 		}
 		fmt.Println()
 	}
+	return order
 }
 
 // findPath returns the (reversed) list of objects []Object{to, ... from}
@@ -206,6 +227,7 @@ type graphNode struct {
 	pred, succ nodeSet    // consumers and dependencies of this node (lazily initialized)
 	index      int        // node index in graph slice/priority queue
 	ndeps      int        // number of outstanding dependencies before this object can be initialized
+	rank       uint64     // cohere's variational spike: obj's place in source order, in the build being ordered
 }
 
 // cost returns the cost of removing this node, which involves copying each
@@ -332,7 +354,8 @@ func (a nodeQueue) Less(i, j int) bool {
 
 	// nodes are prioritized by number of incoming dependencies (1st key)
 	// and source order (2nd key)
-	return x.ndeps < y.ndeps || x.ndeps == y.ndeps && x.obj.order() < y.obj.order()
+	// cohere's variational spike: source order is the build's, its rank.
+	return x.ndeps < y.ndeps || x.ndeps == y.ndeps && x.rank < y.rank
 }
 
 func (a *nodeQueue) Push(x any) {

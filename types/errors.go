@@ -144,6 +144,9 @@ func (err *error_) report() {
 	var builds Mask
 	if check.variational != nil {
 		builds, _ = check.infoBuilds(err.posn().Pos())
+		if check.variational.errorBuilds != 0 {
+			builds = check.variational.errorBuilds
+		}
 	}
 
 	if multiError {

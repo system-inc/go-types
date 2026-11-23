@@ -50,6 +50,9 @@ type BuildOverlays struct {
 	Selections Overlay[*ast.SelectorExpr, *Selection]
 	Instances  Overlay[*ast.Ident, Instance]
 	Scopes     Overlay[ast.Node, *Scope]
+	// InitOrder is the build's whole initialization order when it isn't the host's, which Info.InitOrder holds, and
+	// nil when it is.
+	InitOrder []*Initializer
 }
 
 // Len is how many answers of every map the build has that differ from the host's.
@@ -288,6 +291,8 @@ type infoLogs struct {
 	selections infoAnswers[*ast.SelectorExpr, *Selection]
 	instances  infoAnswers[*ast.Ident, Instance]
 	scopes     infoAnswers[ast.Node, *Scope]
+	// initOrders are each build's initialization order where it isn't the host's (initOrderByBuild).
+	initOrders [8][]*Initializer
 	// functionNodes are the node each function's scope is recorded for, so a body that runs again records its own
 	// scope there (bodyScope).
 	functionNodes map[*Scope]ast.Node
@@ -365,6 +370,9 @@ func (check *Checker) endInfo() {
 	variation.Overlays = make([]BuildOverlays, 8)
 	all := state.all
 	logs := &state.info
+	for build, order := range logs.initOrders {
+		variation.Overlays[build].InitOrder = order
+	}
 	sameObject := func(left Object, right Object) bool { return left == right }
 	if check.Types != nil {
 		logs.types.project(all, func(build int) *Overlay[ast.Expr, TypeAndValue] {

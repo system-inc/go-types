@@ -162,6 +162,131 @@ type variationalState struct {
 	// methodOrders are, under InBuild, each named type's methods the build has, by their index among the origin's
 	// methods, in the build's order (methodsInBuild).
 	methodOrders map[*Named][]int
+	// deps are what each dependency's builds were before a write inside a unit that could restart (addVariationalDep).
+	deps []depUndo
+	// merges counts the declarations mergeVariant folded into an earlier object of their name, so each has its own
+	// rank in source order.
+	merges uint64
+	// errorBuilds, when set, are the builds an error reported outside every unit holds in: initOrderByBuild's, which
+	// reports an initialization cycle for each build it orders.
+	errorBuilds Mask
+}
+
+// depUndo is what one dependency write replaced, so a unit that restarts can put it back.
+type depUndo struct {
+	declaration *declInfo
+	dependency  Object
+	had         bool
+	previous    Mask
+}
+
+// addVariationalDep notes that from depends on to in the builds the current unit runs under, or outside every unit
+// in the builds from's file compiles in.
+func (check *Checker) addVariationalDep(from *declInfo, to Object) {
+	state := check.variational
+	builds := state.all
+	if state.depth > 0 {
+		builds = state.mask
+	} else if from.mask != 0 {
+		builds = from.mask
+	}
+	previous, had := from.depBuilds[to]
+	if previous&builds == builds {
+		return
+	}
+	if state.depth > 0 {
+		state.deps = append(state.deps, depUndo{from, to, had, previous})
+	}
+	if from.depBuilds == nil {
+		from.depBuilds = map[Object]Mask{}
+	}
+	from.depBuilds[to] = previous | builds
+}
+
+// initOrderByBuild gives Info.InitOrder the host's (build 0's) initialization order, and each other build whose order
+// differs its own, each computed as that build's plain check computes it: over the package-level objects the build
+// declares, each by the declaration the build compiles, with the dependencies that build's runs found, in the build's
+// own source order. An initialization cycle is reported once for each build it holds in.
+func (check *Checker) initOrderByBuild() {
+	state := check.variational
+	var host []*Initializer
+	for build := range 8 {
+		mask := Mask(1) << build
+		if state.all&mask == 0 {
+			continue
+		}
+		objMap, ranks := check.objMapIn(mask)
+		state.errorBuilds = mask
+		order := check.initOrderOf(objMap, nil, func(obj dependency) uint64 { return ranks[obj] })
+		state.errorBuilds = 0
+		if build == 0 {
+			host = order
+			check.Info.InitOrder = append(check.Info.InitOrder, order...)
+			continue
+		}
+		if !sameInitOrder(order, host) {
+			// An overlay's order is nil only when it is the host's, so an empty one is kept empty.
+			state.info.initOrders[build] = append([]*Initializer{}, order...)
+		}
+	}
+}
+
+// objMapIn is the package-level objects build declares, each with the declaration build compiles holding only the
+// dependencies build's runs found on objects it declares, and each object's rank in build's source order.
+func (check *Checker) objMapIn(build Mask) (map[Object]*declInfo, map[Object]uint64) {
+	declared := map[Object]*declInfo{}
+	ranks := map[Object]uint64{}
+	for obj, d := range check.objMap {
+		if declaration, rank := declarationIn(obj, d, build); declaration != nil {
+			declared[obj] = declaration
+			ranks[obj] = rank
+		}
+	}
+	// An n:1 declaration is one declInfo for each variable on its left, and stays one.
+	copies := map[*declInfo]*declInfo{}
+	objMap := make(map[Object]*declInfo, len(declared))
+	for obj, declaration := range declared {
+		inBuild := copies[declaration]
+		if inBuild == nil {
+			inBuild = &declInfo{lhs: check.mergedLeftSide(declaration.lhs), init: declaration.init,
+				fdecl: declaration.fdecl, mask: build}
+			for dependency, builds := range declaration.depBuilds {
+				if _, isDeclared := declared[dependency]; isDeclared && builds&build != 0 {
+					inBuild.addDep(dependency)
+				}
+			}
+			copies[declaration] = inBuild
+		}
+		objMap[obj] = inBuild
+	}
+	return objMap, ranks
+}
+
+// declarationIn is the declaration of obj, declared by d, that build compiles, and obj's rank in build's source
+// order, or nil when build doesn't declare obj. An object's rank is its order, and a declaration folded into it from
+// another build's file ranks after the objects declared before it and before the next (mergeVariant).
+func declarationIn(obj Object, d *declInfo, build Mask) (*declInfo, uint64) {
+	variation := variationOf(obj)
+	if variation != nil && len(variation.decls) > 0 {
+		for _, each := range variation.decls {
+			if each.mask&build != 0 {
+				return each.decl, each.rank
+			}
+		}
+		return nil, 0
+	}
+	if d.mask != 0 && d.mask&build == 0 ||
+		variation != nil && variation.presence != 0 && variation.presence&build == 0 {
+		return nil, 0
+	}
+	return d, uint64(obj.order()) << 32
+}
+
+// sameInitOrder reports whether two initialization orders are one: the same variables and expressions in one order.
+func sameInitOrder(left []*Initializer, right []*Initializer) bool {
+	return slices.EqualFunc(left, right, func(left *Initializer, right *Initializer) bool {
+		return left.Rhs == right.Rhs && slices.Equal(left.Lhs, right.Lhs)
+	})
 }
 
 // register makes state the one reads on this goroutine answer under, keeping the one it replaces to put back.
@@ -317,6 +442,7 @@ type declVariant struct {
 	mask Mask
 	decl *declInfo
 	iota constant.Value // a constant's iota in this declaration
+	rank uint64         // the declaration's place in source order (declarationIn)
 }
 
 // namedVariation is a named type's underlying type by build, when it differs.
@@ -881,6 +1007,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 	savedPath := len(check.objPath)
 	savedEnvironment := check.environment
 	savedErrors := len(check.pendingErrors)
+	savedDeps := len(check.variational.deps)
 	check.variational.mask = builds
 	check.variational.depth++
 	defer func() {
@@ -906,6 +1033,15 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 		}
 		check.vundo = check.vundo[:savedUndo]
 		check.variational.info.rollback(savedInfo)
+		for index := len(check.variational.deps) - 1; index >= savedDeps; index-- {
+			undo := check.variational.deps[index]
+			if undo.had {
+				undo.declaration.depBuilds[undo.dependency] = undo.previous
+			} else {
+				delete(undo.declaration.depBuilds, undo.dependency)
+			}
+		}
+		check.variational.deps = check.variational.deps[:savedDeps]
 		for index := savedDelayed; index < len(check.delayed); index++ {
 			if !check.delayed[index].persistent {
 				check.delayed[index].f = func() {}
@@ -930,6 +1066,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 	if declaration || check.variational.depth == 1 {
 		check.vundo = check.vundo[:savedUndo]
 		check.variational.info.keep(savedInfo)
+		check.variational.deps = check.variational.deps[:savedDeps]
 	}
 	if declaration {
 		for index := savedDelayed; index < len(check.delayed); index++ {
@@ -1070,7 +1207,8 @@ func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) in
 	firstBase := first.(interface{ base() *object }).base()
 	firstVariation := firstBase.ensureVariation()
 	if len(firstVariation.decls) == 0 {
-		firstVariation.decls = []declVariant{{mask: firstDecl.mask, decl: firstDecl, iota: iotaOf(first)}}
+		firstVariation.decls = []declVariant{{mask: firstDecl.mask, decl: firstDecl, iota: iotaOf(first),
+			rank: uint64(first.order()) << 32}}
 		firstVariation.presence = firstDecl.mask
 	}
 	held := firstVariation.presence
@@ -1094,7 +1232,11 @@ func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) in
 		obj.setParent(check.pkg.scope)
 		return variantAlternate
 	}
-	firstVariation.decls = append(firstVariation.decls, declVariant{mask: d.mask, decl: d, iota: iotaOf(obj)})
+	// Its rank is after the last object declared, whose order is how many there are, and after any declaration folded
+	// in since.
+	check.variational.merges++
+	firstVariation.decls = append(firstVariation.decls, declVariant{mask: d.mask, decl: d, iota: iotaOf(obj),
+		rank: uint64(len(check.objMap))<<32 | check.variational.merges})
 	firstVariation.presence |= d.mask
 	if firstVariation.presence == check.variational.all {
 		firstVariation.presence = 0
