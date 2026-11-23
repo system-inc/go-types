@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/token"
 	. "github.com/system-inc/go-types/internal/types/errors"
+	"sync/atomic"
 )
 
 // ----------------------------------------------------------------------------
@@ -23,6 +24,8 @@ type Interface struct {
 	complete  bool         // indicates that obj, methods, and embeddeds are set and type set can be computed
 
 	tset *_TypeSet // type set described by this interface, computed lazily
+	// cohere's variational spike: the type set in each build, once the interface's checker is gone, when it differs
+	byBuild atomic.Pointer[buildTypeSets]
 }
 
 // typeSet returns the type set for interface t.
@@ -151,7 +154,12 @@ func (t *Interface) String() string   { return TypeString(t, nil) }
 // Implementation
 
 func (t *Interface) cleanup() {
-	t.typeSet() // any interface that escapes type checking must be safe for concurrent use
+	// cohere's variational spike: a variational check's interface settles a type set for each build.
+	if t.check.variational != nil {
+		t.check.settleTypeSets(t)
+	} else {
+		t.typeSet() // any interface that escapes type checking must be safe for concurrent use
+	}
 	t.check = nil
 	t.embedPos = nil
 }

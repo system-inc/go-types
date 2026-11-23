@@ -171,6 +171,12 @@ func computeInterfaceTypeSet(check *Checker, pos token.Pos, ityp *Interface) *_T
 		return &topTypeSet
 	}
 
+	// cohere's variational spike: once the interface's checker is gone, its type set is read by build, and kept for
+	// each build, never in tset, which a read for another build would find.
+	if ityp.check == nil && variationsExist.Load() {
+		return ityp.typeSetByBuild(nopos, typeSetState(check))
+	}
+
 	if check != nil && check.conf._Trace {
 		// Types don't generally have position information.
 		// If we don't have a valid pos provided, try to use
@@ -206,6 +212,14 @@ func computeInterfaceTypeSet(check *Checker, pos token.Pos, ityp *Interface) *_T
 		}()
 	}
 
+	fillInterfaceTypeSet(check, pos, ityp, ityp.tset)
+	completed = true
+	return ityp.tset
+}
+
+// fillInterfaceTypeSet is computeInterfaceTypeSet's own body, filling tset, ityp's type set in the making (cohere's
+// variational spike: split from computeInterfaceTypeSet, so a type set for one build fills a set of its own).
+func fillInterfaceTypeSet(check *Checker, pos token.Pos, ityp *Interface, tset *_TypeSet) {
 	var unionSets map[*Union]*_TypeSet
 	if check != nil {
 		if check.unionTypeSets == nil {
@@ -320,15 +334,12 @@ func computeInterfaceTypeSet(check *Checker, pos token.Pos, ityp *Interface) *_T
 		allTerms, allComparable = intersectTermLists(allTerms, allComparable, terms, comparable)
 	}
 
-	ityp.tset.comparable = allComparable
+	tset.comparable = allComparable
 	if len(allMethods) != 0 {
 		sortMethods(allMethods)
-		ityp.tset.methods = allMethods
+		tset.methods = allMethods
 	}
-	ityp.tset.terms = allTerms
-
-	completed = true
-	return ityp.tset
+	tset.terms = allTerms
 }
 
 // TODO(gri) The intersectTermLists function belongs to the termlist implementation.

@@ -25,6 +25,7 @@ var projectionFixtures = map[string][]fixtureFile{
 	"scopes":           scopeFiles,
 	"init order":       initOrderFiles,
 	"imports":          importFiles,
+	"interfaces":       interfaceFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
@@ -81,36 +82,39 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 					overlaid += overlays.Len()
 				}
 				label := fmt.Sprintf("build %03b", build)
-				compareSpelled(test, label+" Defs", spellObjects(spelling, project(info.Defs, overlays.Defs)),
-					spellObjects(spelling, plain.Defs))
-				compareSpelled(test, label+" Uses", spellObjects(spelling, project(info.Uses, overlays.Uses)),
-					spellObjects(spelling, plain.Uses))
-				compareSpelled(test, label+" Implicits",
-					spellObjects(spelling, project(info.Implicits, overlays.Implicits)),
-					spellObjects(spelling, plain.Implicits))
-				compareSpelled(test, label+" Selections",
-					spelling.selections(project(info.Selections, overlays.Selections)),
-					spelling.selections(plain.Selections))
-				compareSpelled(test, label+" Instances",
-					spellInstances(fileSet, project(info.Instances, overlays.Instances)),
-					spellInstances(fileSet, plain.Instances))
-				compareTypes(test, fileSet, label+" Types", project(info.Types, overlays.Types), plain.Types)
-				compareSpelled(test, label+" Scopes", spelling.scopes(project(info.Scopes, overlays.Scopes)),
-					spelling.scopes(plain.Scopes))
-				initOrder := info.InitOrder
-				if overlays.InitOrder != nil {
-					initOrder = overlays.InitOrder
-				}
-				if got, want := spelling.initOrder(initOrder), spelling.initOrder(plain.InitOrder); got != want {
-					test.Errorf("%s InitOrder: projected\n\t%s\nplain\n\t%s", label, got, want)
-				}
-				imports := checked.Imports()
-				if overlays.Imports != nil {
-					imports = overlays.Imports
-				}
-				if got, want := importPaths(imports), importPaths(plainPackage.Imports()); got != want {
-					test.Errorf("%s Imports: projected %s, plain %s", label, got, want)
-				}
+				// What the projection answers is read as the build has it: one interface's type set differs by build.
+				types.InBuild(build, func() {
+					compareSpelled(test, label+" Defs", spellObjects(spelling, project(info.Defs, overlays.Defs)),
+						spellObjects(spelling, plain.Defs))
+					compareSpelled(test, label+" Uses", spellObjects(spelling, project(info.Uses, overlays.Uses)),
+						spellObjects(spelling, plain.Uses))
+					compareSpelled(test, label+" Implicits",
+						spellObjects(spelling, project(info.Implicits, overlays.Implicits)),
+						spellObjects(spelling, plain.Implicits))
+					compareSpelled(test, label+" Selections",
+						spelling.selections(project(info.Selections, overlays.Selections)),
+						spelling.selections(plain.Selections))
+					compareSpelled(test, label+" Instances",
+						spellInstances(fileSet, project(info.Instances, overlays.Instances)),
+						spellInstances(fileSet, plain.Instances))
+					compareTypes(test, fileSet, label+" Types", project(info.Types, overlays.Types), plain.Types)
+					compareSpelled(test, label+" Scopes", spelling.scopes(project(info.Scopes, overlays.Scopes)),
+						spelling.scopes(plain.Scopes))
+					initOrder := info.InitOrder
+					if overlays.InitOrder != nil {
+						initOrder = overlays.InitOrder
+					}
+					if got, want := spelling.initOrder(initOrder), spelling.initOrder(plain.InitOrder); got != want {
+						test.Errorf("%s InitOrder: projected\n\t%s\nplain\n\t%s", label, got, want)
+					}
+					imports := checked.Imports()
+					if overlays.Imports != nil {
+						imports = overlays.Imports
+					}
+					if got, want := importPaths(imports), importPaths(plainPackage.Imports()); got != want {
+						test.Errorf("%s Imports: projected %s, plain %s", label, got, want)
+					}
+				})
 			}
 			compareDiagnostics(test, published, plainDiagnostics)
 			// Every fixture's builds declare things in files of their own, so some answers differ from the host's.

@@ -25,6 +25,7 @@ package types
 import (
 	"go/ast"
 	"go/constant"
+	"go/token"
 	"iter"
 	"math/bits"
 	"slices"
@@ -172,6 +173,151 @@ type variationalState struct {
 	errorBuilds Mask
 	// imports are each build's imports, in the order its files meet them (noteImport).
 	imports [8][]*Package
+	// building are the type sets this goroutine is computing for one build each (typeSetIn), so an interface that
+	// reaches itself finds its set in the making, as tset is for a check.
+	building map[buildInterface]*_TypeSet
+}
+
+// buildInterface is an interface's type set in one build.
+type buildInterface struct {
+	iface *Interface
+	build int
+}
+
+// buildTypeSets are an interface's type set in each build, each written once, for an interface whose checker is gone.
+// alike is set once a set was computed reading nothing that differs by build, and then every build has it.
+type buildTypeSets struct {
+	sets  [8]atomic.Pointer[_TypeSet]
+	alike atomic.Bool
+}
+
+// typeSetState is the state a type set read on check's behalf answers under, by build: check's own when it runs a
+// variational check, else the goroutine's, or hostRead for a goroutine with none.
+func typeSetState(check *Checker) *variationalState {
+	if check != nil && check.variational != nil {
+		return check.variational
+	}
+	if state := runningState(); state != nil {
+		return state
+	}
+	return hostRead
+}
+
+// typeSetByBuild is ityp's type set in state's builds, splitting a unit whose builds have different sets. Read outside
+// every unit, it is the first build's. A set that differs by build is a narrowed read, as an object's answer is.
+func (ityp *Interface) typeSetByBuild(pos token.Pos, state *variationalState) *_TypeSet {
+	sets := ityp.byBuild.Load()
+	if sets == nil {
+		sets = &buildTypeSets{}
+		if !ityp.byBuild.CompareAndSwap(nil, sets) {
+			sets = ityp.byBuild.Load()
+		}
+	}
+	if sets.alike.Load() {
+		return sets.sets[0].Load()
+	}
+	mask := state.mask
+	if state.depth == 0 {
+		mask &= -mask
+	}
+	if state == hostRead {
+		// hostRead is every goroutine's, so a set not yet computed is computed under a state of this goroutine's own.
+		if set := sets.sets[0].Load(); set != nil {
+			if !sets.alike.Load() {
+				state.narrowed.Add(1)
+			}
+			return set
+		}
+		var set *_TypeSet
+		InBuild(1, func() { set = ityp.typeSetByBuild(pos, runningState()) })
+		if !sets.alike.Load() {
+			hostRead.narrowed.Add(1)
+		}
+		return set
+	}
+	var parts []Mask
+	var partSets []*_TypeSet
+	for build := range 8 {
+		if mask&(1<<build) == 0 {
+			continue
+		}
+		set := ityp.typeSetIn(pos, build, sets, state)
+		index := slices.IndexFunc(partSets, func(other *_TypeSet) bool { return sameTypeSet(other, set) })
+		if index < 0 {
+			parts = append(parts, 0)
+			partSets = append(partSets, set)
+			index = len(parts) - 1
+		}
+		parts[index] |= 1 << build
+	}
+	if !sets.alike.Load() {
+		state.narrowed.Add(1)
+	}
+	if len(parts) > 1 {
+		splitAt(state, parts)
+	}
+	return partSets[0]
+}
+
+// typeSetIn is ityp's type set in build, computed under state narrowed to build when no goroutine has kept it yet. A
+// set computed reading nothing that differs by build is every build's.
+func (ityp *Interface) typeSetIn(pos token.Pos, build int, sets *buildTypeSets, state *variationalState) *_TypeSet {
+	if set := sets.sets[build].Load(); set != nil {
+		return set
+	}
+	key := buildInterface{ityp, build}
+	if set := state.building[key]; set != nil {
+		return set
+	}
+	savedMask, savedDepth := state.mask, state.depth
+	state.mask, state.depth = 1<<build, max(savedDepth, 1)
+	set := &_TypeSet{terms: allTermlist}
+	if state.building == nil {
+		state.building = map[buildInterface]*_TypeSet{}
+	}
+	state.building[key] = set
+	defer func() {
+		delete(state.building, key)
+		state.mask, state.depth = savedMask, savedDepth
+	}()
+	before := state.narrowed.Load()
+	fillInterfaceTypeSet(nil, pos, ityp, set)
+	if state.narrowed.Load() == before {
+		for each := range sets.sets {
+			sets.sets[each].CompareAndSwap(nil, set)
+		}
+		sets.alike.Store(true)
+		return sets.sets[build].Load()
+	}
+	if !sets.sets[build].CompareAndSwap(nil, set) {
+		set = sets.sets[build].Load()
+	}
+	return set
+}
+
+// settleTypeSets gives iface, an interface of check's leaving it, its type set in each of check's builds, and keeps it
+// in tset as well when every build has one.
+func (check *Checker) settleTypeSets(iface *Interface) {
+	if iface.tset != nil || !iface.complete {
+		return
+	}
+	state := check.variational
+	sets := &buildTypeSets{}
+	iface.byBuild.Store(sets)
+	for build := range 8 {
+		if state.all&(1<<build) != 0 {
+			iface.typeSetIn(nopos, build, sets, state)
+		}
+	}
+	if sets.alike.Load() {
+		iface.tset = sets.sets[0].Load()
+	}
+}
+
+// sameTypeSet reports whether two type sets are one: the same methods, comparability and terms.
+func sameTypeSet(left *_TypeSet, right *_TypeSet) bool {
+	return left == right || slices.Equal(left.methods, right.methods) && left.comparable == right.comparable &&
+		left.terms.equal(right.terms)
 }
 
 // noteImport adds imported to the imports of each of builds that hasn't met it yet.
