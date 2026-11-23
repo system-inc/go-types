@@ -221,3 +221,61 @@ func TestVariationalReportsANameRedeclaredInABuildItsMergedDeclarationsCover(t *
 		t.Error("the variational check reported nothing, and linux's plain check reports Value redeclared")
 	}
 }
+
+// methodSignatureFiles declare a method on a shared type in each build's own file, its result a slice on darwin and
+// linux and a string on windows, on the value and on the pointer receiver. A shared file calls each, takes each as a
+// method value and as a method expression, and assigns the type to an interface declared by build, and each build's
+// plain check reads its own build's signature.
+var methodSignatureFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+type W struct{}
+
+func Called(w W) int { return len(w.M()) }
+
+func PointerCalled(w *W) int { return len(w.P()) }
+
+func Valued(w W) int {
+	method := w.M
+	return len(method())
+}
+
+func Expressed() int { return len(W.M(W{})) }
+
+func PointerExpressed(w *W) int { return len((*W).P(w)) }
+
+var Value = W{}.M
+
+var Expression = W.M
+
+var PointerValue = (&W{}).P
+
+var PointerExpression = (*W).P
+
+var Held I = W{}
+
+func Satisfied(w *W) I { return w }
+`},
+	{"method_unix.go", buildDarwin | buildLinux, `package fork
+
+func (W) M() []int { return nil }
+
+func (*W) P() []int { return nil }
+
+type I interface{ M() []int }
+`},
+	{"method_windows.go", buildWindows, `package fork
+
+func (W) M() string { return "" }
+
+func (*W) P() string { return "" }
+
+type I interface{ M() string }
+`},
+}
+
+// TestVariationalProjectsAMethodWhoseSignatureDiffersByBuild is the projection test over methodSignatureFiles.
+func TestVariationalProjectsAMethodWhoseSignatureDiffersByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, methodSignatureFiles)
+}
