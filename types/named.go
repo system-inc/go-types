@@ -371,7 +371,11 @@ func (check *Checker) newNamedInstance(pos token.Pos, orig *Named, targs []Type,
 func (n *Named) cleanup() {
 	// Instances can have a nil underlying at the end of type checking — they
 	// will lazily expand it as needed. All other types must have one.
-	if n.inst == nil {
+	//
+	// cohere's variational spike: but for a local type whose declaration a split abandoned before its right-hand side
+	// was read, since its right-hand side differs by build, which nothing reads again.
+	abandoned := n.check != nil && n.check.variational != nil && n.fromRHS == nil
+	if n.inst == nil && !abandoned {
 		n.Underlying()
 	}
 	n.check = nil
@@ -638,7 +642,11 @@ func (n *Named) Underlying() Type {
 	}
 
 	if !n.stateHas(hasUnder) { // minor performance optimization
-		n.resolveUnderlying()
+		// cohere's variational spike: a chain through a named type whose underlying type differs by build keeps no
+		// memo, so n's underlying type for the current builds is the one just resolved.
+		if u := n.resolveUnderlying(); !n.stateHas(hasUnder) {
+			return u
+		}
 	}
 
 	return n.underlying
@@ -663,7 +671,11 @@ func (t *Named) String() string { return TypeString(t, nil) }
 // resolveUnderlying assumes that there are no direct cycles; if there were
 // any, they were broken (by setting the respective types to invalid) during
 // the directCycles check phase.
-func (n *Named) resolveUnderlying() {
+//
+// cohere's variational spike: it returns the underlying type it resolved,
+// which a chain through a named type whose underlying type differs by build
+// answers for the current builds and keeps in no memo.
+func (n *Named) resolveUnderlying() Type {
 	assert(n.stateHas(lazyLoaded | unpacked))
 
 	var seen map[*Named]bool // for debugging only
@@ -725,6 +737,7 @@ func (n *Named) resolveUnderlying() {
 			}
 		}()
 	}
+	return u
 }
 
 func (n *Named) lookupMethod(pkg *Package, name string, foldCase bool) (int, *Func) {

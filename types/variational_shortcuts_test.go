@@ -329,3 +329,44 @@ func TestVariationalProjectsVariablesDeclaredTogetherByBuild(t *testing.T) {
 	t.Parallel()
 	projectAndCompare(t, pairFiles)
 }
+
+// definedOverFiles define types over Box and Pair, whose underlying types differ by build: Box declared again in each
+// build's file, and Pair a generic type declared again by build, read through its instance Pair[int64]. A function's
+// local types and package-level ones are defined over each, and their sizes read in a body, in a package-level
+// variable's initializer and in a body whose local type is over the instance.
+var definedOverFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+import "unsafe"
+
+var Early = func() uintptr { type Local Box; var local Local; return unsafe.Sizeof(local) }()
+
+func LocalSize() uintptr { type Local Box; return unsafe.Sizeof(Local{}) }
+
+func LocalPairSize() uintptr { type Local Pair[int64]; return unsafe.Sizeof(Local{}) }
+
+type Sized Box
+
+type SizedPair Pair[int64]
+
+func Sizes() (uintptr, uintptr) { return unsafe.Sizeof(Sized{}), unsafe.Sizeof(SizedPair{}) }
+`},
+	{"box_unix.go", buildDarwin | buildLinux, `package fork
+
+type Box struct{ Value int64 }
+
+type Pair[T any] struct{ Left T }
+`},
+	{"box_windows.go", buildWindows, `package fork
+
+type Box struct{ Value, Extra int64 }
+
+type Pair[T any] struct{ Left, Right T }
+`},
+}
+
+// TestVariationalProjectsATypeDefinedOverOneThatDiffersByBuild is the projection test over definedOverFiles.
+func TestVariationalProjectsATypeDefinedOverOneThatDiffersByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, definedOverFiles)
+}
