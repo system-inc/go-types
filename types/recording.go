@@ -68,7 +68,8 @@ func (check *Checker) recordTypeAndValue(x ast.Expr, mode operandMode, typ Type,
 		// recorded as type parameters.
 		assert(!isValid(typ) || allBasic(typ, IsConstType))
 	}
-	if m := check.Types; m != nil {
+	// cohere's variational spike: a variational check keeps each answer by build until it ends.
+	if m := check.Types; m != nil && check.variational == nil {
 		m[x] = TypeAndValue{mode, typ, val}
 	}
 	if check.variational != nil {
@@ -105,10 +106,11 @@ func (check *Checker) recordCommaOkTypes(x ast.Expr, a []*operand) {
 	}
 	t0, t1 := a[0].typ(), a[1].typ()
 	assert(isTyped(t0) && isTyped(t1) && (allBoolean(t1) || t1 == universeError))
-	if check.variational != nil && check.Types == nil {
+	// cohere's variational spike: a variational check rewrites the answer it recorded for the current unit's builds.
+	if check.variational != nil {
 		check.rewriteCommaOk(x, t0, t1)
 	}
-	if m := check.Types; m != nil {
+	if m := check.Types; m != nil && check.variational == nil {
 		for {
 			tv := m[x]
 			assert(tv.Type != nil) // should have been recorded already
@@ -118,9 +120,6 @@ func (check *Checker) recordCommaOkTypes(x ast.Expr, a []*operand) {
 				newVar(LocalVar, pos, check.pkg, "", t1),
 			)
 			m[x] = tv
-			if check.variational != nil {
-				check.rewriteVariational(x, tv)
-			}
 			// if x is a parenthesized expression (p.X), update p.X
 			p, _ := x.(*ast.ParenExpr)
 			if p == nil {

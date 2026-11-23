@@ -19,7 +19,8 @@ import (
 // file only some builds compile compares only as being in such a file, since a name declared in each build's own file
 // is one object for all of them, at its first declaration, and declarations alike across builds fold into one, as the
 // model has it (variational.go). Selections compare by kind, index, indirection and object, and instances by their
-// type arguments and type. The variational check's diagnostics, told apart, are every build's plain diagnostics.
+// type arguments and type, and expressions' types and values as the census spells them. The variational check's
+// diagnostics, told apart, are every build's plain diagnostics.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
 	for name, fixtures := range map[string][]fixtureFile{
@@ -82,6 +83,7 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 				compareSpelled(test, label+" Instances",
 					spellInstances(fileSet, project(info.Instances, overlays.Instances)),
 					spellInstances(fileSet, plain.Instances))
+				compareTypes(test, fileSet, label+" Types", project(info.Types, overlays.Types), plain.Types)
 			}
 			compareDiagnostics(test, published, plainDiagnostics)
 			// Every fixture's builds declare things in files of their own, so some answers differ from the host's.
@@ -124,6 +126,7 @@ func (WaitStatus) Signaled() bool { return true }
 // fullInfo is an Info with every map that varies by build.
 func fullInfo() *types.Info {
 	return &types.Info{
+		Types:      map[ast.Expr]types.TypeAndValue{},
 		Defs:       map[*ast.Ident]types.Object{},
 		Uses:       map[*ast.Ident]types.Object{},
 		Implicits:  map[ast.Node]types.Object{},

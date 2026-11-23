@@ -35,8 +35,9 @@ import (
 type Mask uint8
 
 // Variation is what a variational check is given and what it answers. Builds is every build the check covers, and
-// Files says which of them compile each file, a file it doesn't name compiling in every one. Types is the answer:
-// every expression's type and value, with the builds each holds in.
+// Files says which of them compile each file, a file it doesn't name compiling in every one. Types is the answer when
+// the caller's Info has no Types map: every expression's type and value, with the builds each holds in. With one, it
+// stays nil, and Info.Types holds the host's answers and Overlays each other build's, as every other Info map.
 type Variation struct {
 	Builds Mask
 	Files  map[*ast.File]Mask
@@ -183,8 +184,8 @@ func (check *Checker) readState() *variationalState {
 }
 
 // recordTypes reports whether check records expressions' types: when its Info has a Types map, and always in a
-// variational check, which records its answers in Variation.Types. go/types skips recording builtins and comma-ok
-// types without it.
+// variational check, which without one records its answers in Variation.Types. go/types skips recording builtins and
+// comma-ok types without it.
 func (check *Checker) recordTypes() bool {
 	return check.Types != nil || check.variational != nil
 }
@@ -880,8 +881,14 @@ func (check *Checker) flushUntyped(from int) {
 }
 
 // recordVariational writes x's answer for the current unit's builds, keeping what it replaced while a unit runs that
-// could restart.
+// could restart: in the caller's Types map as every Info map is answered (variational_info.go), and in Variation.Types
+// when the caller gives none.
 func (check *Checker) recordVariational(x ast.Expr, tv TypeAndValue) {
+	if check.Types != nil {
+		builds, undoable := check.infoBuilds(x.Pos())
+		check.variational.info.types.recordAt(x, tv, builds, check.variational.all, check.recordOrder, undoable)
+		return
+	}
 	mask := check.variational.all
 	if check.variational.depth > 0 {
 		mask = check.variational.mask
@@ -894,18 +901,13 @@ func (check *Checker) recordVariational(x ast.Expr, tv TypeAndValue) {
 	types[x] = previous.with(mask, tv, check.recordOrder)
 }
 
-// rewriteVariational replaces x's answer for the current unit's builds, as recordCommaOkTypes rewrites a recorded type.
-func (check *Checker) rewriteVariational(x ast.Expr, tv TypeAndValue) {
-	check.recordVariational(x, tv)
-}
-
 // startVariational begins a variational check of check's package, if its configuration asks for one.
 func (check *Checker) startVariational() bool {
 	variation := check.conf.Variation
 	if variation == nil {
 		return false
 	}
-	if variation.Types == nil {
+	if variation.Types == nil && check.Types == nil {
 		variation.Types = map[ast.Expr]Answers{}
 	}
 	check.variational = &variationalState{all: variation.Builds, mask: variation.Builds, variation: variation}
@@ -916,7 +918,7 @@ func (check *Checker) startVariational() bool {
 	checksByGoroutine.Store(goroutine, check.variational)
 	runningChecks.Add(1)
 	check.startInfo()
-	check.recordOrder = -1
+	check.recordOrder = unordered
 	return true
 }
 
@@ -1339,25 +1341,17 @@ func freshBodyScope(sig *Signature) {
 	scope.children = scope.children[:scope.bodyChildren]
 }
 
-// rewriteCommaOk is recordCommaOkTypes for a variational check without a Types map: x's answer for the current
-// unit's builds, and each parenthesized expression inside it, becomes the comma-ok tuple.
+// rewriteCommaOk is recordCommaOkTypes for a variational check: x's answer for the current unit's builds, and each
+// parenthesized expression inside it, becomes the comma-ok tuple.
 func (check *Checker) rewriteCommaOk(x ast.Expr, t0 Type, t1 Type) {
-	mask := check.variational.all
-	if check.variational.depth > 0 {
-		mask = check.variational.mask
-	}
 	for {
-		for answer := range check.variational.variation.Types[x].All() {
-			if answer.Builds&mask == mask {
-				tv := answer.TypeAndValue
-				pos := x.Pos()
-				tv.Type = NewTuple(
-					newVar(LocalVar, pos, check.pkg, "", t0),
-					newVar(LocalVar, pos, check.pkg, "", t1),
-				)
-				check.recordVariational(x, tv)
-				break
-			}
+		if tv, recorded := check.recordedAnswer(x); recorded {
+			pos := x.Pos()
+			tv.Type = NewTuple(
+				newVar(LocalVar, pos, check.pkg, "", t0),
+				newVar(LocalVar, pos, check.pkg, "", t1),
+			)
+			check.recordVariational(x, tv)
 		}
 		parenthesized, isParenthesized := x.(*ast.ParenExpr)
 		if !isParenthesized {
@@ -1365,6 +1359,25 @@ func (check *Checker) rewriteCommaOk(x ast.Expr, t0 Type, t1 Type) {
 		}
 		x = parenthesized.X
 	}
+}
+
+// recordedAnswer is x's answer recorded for the builds a write of x now holds in, and whether one answer holds in
+// all of them.
+func (check *Checker) recordedAnswer(x ast.Expr) (TypeAndValue, bool) {
+	if check.Types != nil {
+		builds, _ := check.infoBuilds(x.Pos())
+		return check.variational.info.types.covering(x, builds)
+	}
+	mask := check.variational.all
+	if check.variational.depth > 0 {
+		mask = check.variational.mask
+	}
+	for answer := range check.variational.variation.Types[x].All() {
+		if answer.Builds&mask == mask {
+			return answer.TypeAndValue, true
+		}
+	}
+	return TypeAndValue{}, false
 }
 
 // mergedLeftSide is a variable declaration's left side with each variable replaced by the package-level object of its

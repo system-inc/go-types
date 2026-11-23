@@ -1,6 +1,7 @@
 package types_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -157,31 +158,38 @@ func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diag
 	if diagnosing {
 		configuration.Error = func(diagnostic error) { published = append(published, diagnostic.Error()) }
 	}
-	if _, checkError := configuration.Check("fork", fileSet, files, &types.Info{}); checkError != nil && !diagnosing {
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+	if _, checkError := configuration.Check("fork", fileSet, files, info); checkError != nil && !diagnosing {
 		t.Fatalf("variational check: %v", checkError)
 	}
 	plainDiagnostics := map[string]bool{}
-	if len(variation.Types) == 0 {
+	if len(info.Types) == 0 {
 		t.Fatal("the variational check recorded no answers")
 	}
-	forked := map[string]bool{}
-	for expression, answers := range variation.Types {
-		covered := types.Mask(0)
-		for built := range answers.All() {
-			if covered&built.Builds != 0 {
-				t.Errorf("%s: two answers for one build", fileSet.Position(expression.Pos()))
+	builds := []types.Mask{buildDarwin, buildLinux, buildWindows}
+	// Each build's answers are the host's, in Info.Types, with the build's overlay laid over them.
+	projections := make([]map[ast.Expr]types.TypeAndValue, len(builds))
+	answered := map[ast.Expr]map[string]bool{}
+	for index := range builds {
+		overlay := types.Overlay[ast.Expr, types.TypeAndValue]{}
+		if index > 0 {
+			overlay = variation.Overlays[index].Types
+		}
+		projections[index] = project(info.Types, overlay)
+		for expression, tv := range projections[index] {
+			if answered[expression] == nil {
+				answered[expression] = map[string]bool{}
 			}
-			covered |= built.Builds
+			answered[expression][answer(tv)] = true
 		}
-		distinct := map[string]bool{}
-		for built := range answers.All() {
-			distinct[answer(built.TypeAndValue)] = true
-		}
+	}
+	forked := map[string]bool{}
+	for expression, distinct := range answered {
 		if len(distinct) > 1 {
 			forked[enclosingFunction(files, fileSet, expression)] = true
 		}
 	}
-	for _, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
+	for index, build := range builds {
 		var built []*ast.File
 		for _, file := range files {
 			if masks[file]&build != 0 {
@@ -196,47 +204,7 @@ func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diag
 		if _, checkError := plainConfiguration.Check("fork", fileSet, built, plain); checkError != nil && !diagnosing {
 			t.Fatalf("plain check of build %03b: %v", build, checkError)
 		}
-		// Keyed by position and text, never by node: a checker makes some nodes afresh each time it checks
-		// them (the 1 of an IncDec statement).
-		projected := map[string]string{}
-		for expression, answers := range variation.Types {
-			for candidate := range answers.All() {
-				if candidate.Builds&build == 0 {
-					continue
-				}
-				key := positionKey(fileSet, expression)
-				if earlier, held := projected[key]; held {
-					// Two nodes at one place answer for this build: a run abandoned for a split left its own
-					// node (one the checker makes afresh, as an IncDec's 1) behind.
-					t.Errorf("build %03b, %s: two answers at one place, %q and %q", build, key, earlier,
-						answer(candidate.TypeAndValue))
-				}
-				projected[key] = answer(candidate.TypeAndValue)
-			}
-		}
-		plainKeys := map[string]bool{}
-		matched := 0
-		for expression, want := range plain.Types {
-			plainKeys[positionKey(fileSet, expression)] = true
-			got := projected[positionKey(fileSet, expression)]
-			if got != answer(want) {
-				t.Errorf("build %03b, %s %s: projected %q, plain %q", build, fileSet.Position(expression.Pos()),
-					types.ExprString(expression), got, answer(want))
-				continue
-			}
-			matched++
-		}
-		if matched == 0 {
-			t.Errorf("build %03b: no expression compared", build)
-		}
-		for expression, answers := range variation.Types {
-			for candidate := range answers.All() {
-				if planned := plainKeys[positionKey(fileSet, expression)]; candidate.Builds&build != 0 && !planned {
-					t.Errorf("build %03b, %s %s: projected %q, and the plain check has no answer", build,
-						fileSet.Position(expression.Pos()), types.ExprString(expression), answer(candidate.TypeAndValue))
-				}
-			}
-		}
+		compareTypes(t, fileSet, fmt.Sprintf("build %03b", build), projections[index], plain.Types)
 	}
 	compareDiagnostics(t, published, plainDiagnostics)
 	var forkedNames []string
@@ -265,6 +233,42 @@ func compareDiagnostics(t *testing.T, published []string, plain map[string]bool)
 		if !publishedOnce[diagnostic] {
 			t.Errorf("a plain check reported %q, and the variational check doesn't", diagnostic)
 		}
+	}
+}
+
+// compareTypes requires projected, one build's projection of a variational check's Types, to be plain, that build's
+// plain check's, expression for expression. Keyed by position and text, never by node: a checker makes some nodes
+// afresh each time it checks them (the 1 of an IncDec statement).
+func compareTypes(t *testing.T, fileSet *token.FileSet, label string, projected map[ast.Expr]types.TypeAndValue,
+	plain map[ast.Expr]types.TypeAndValue,
+) {
+	t.Helper()
+	spelled := map[string]string{}
+	for expression, tv := range projected {
+		key := positionKey(fileSet, expression)
+		if earlier, held := spelled[key]; held {
+			// Two nodes at one place answer for this build: a run abandoned for a split left its own node (one the
+			// checker makes afresh, as an IncDec's 1) behind.
+			t.Errorf("%s, %s: two answers at one place, %q and %q", label, key, earlier, answer(tv))
+		}
+		spelled[key] = answer(tv)
+	}
+	matched := 0
+	for expression, want := range plain {
+		key := positionKey(fileSet, expression)
+		got, held := spelled[key]
+		delete(spelled, key)
+		if !held || got != answer(want) {
+			t.Errorf("%s, %s: projected %q, plain %q", label, key, got, answer(want))
+			continue
+		}
+		matched++
+	}
+	if matched == 0 {
+		t.Errorf("%s: no expression compared", label)
+	}
+	for key, got := range spelled {
+		t.Errorf("%s, %s: projected %q, and the plain check has no answer", label, key, got)
 	}
 }
 

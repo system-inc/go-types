@@ -1,10 +1,10 @@
 // This file is cohere's, for the variational check (variational.go): the Info maps a caller gives a variational
-// check, answered by build. Types is answered in Variation.Types; this file answers Defs, Uses, Implicits, Selections
-// and Instances. While the check runs, each answer is kept with the builds it holds in, and undone with its unit when
-// the unit restarts, as Types' answers are. When the check ends, the caller's maps get the host's answers (build 0's),
-// so a reader of the plain maps reads the host's plain check, and Variation.Overlays gets, for each other build, only
-// the answers in which that build differs from the host. go/types never reads these maps back while it checks, so
-// holding them aside until the end changes no answer.
+// check, answered by build: Types, Defs, Uses, Implicits, Selections and Instances. A caller that gives no Types map
+// has every expression's answers in Variation.Types instead. While the check runs, each answer is kept with the
+// builds it holds in, and undone with its unit when the unit restarts. When the check ends, the caller's maps get the
+// host's answers (build 0's), so a reader of the plain maps reads the host's plain check, and Variation.Overlays gets,
+// for each other build, only the answers in which that build differs from the host. go/types never reads these maps
+// back while it checks, so holding them aside until the end changes no answer.
 
 package types
 
@@ -43,6 +43,7 @@ func (overlay *Overlay[K, V]) remove(key K) {
 // BuildOverlays is one build's overlays, one for each Info map the check was given; the overlay of a map it wasn't
 // given stays empty.
 type BuildOverlays struct {
+	Types      Overlay[ast.Expr, TypeAndValue]
 	Defs       Overlay[*ast.Ident, Object]
 	Uses       Overlay[*ast.Ident, Object]
 	Implicits  Overlay[ast.Node, Object]
@@ -52,15 +53,20 @@ type BuildOverlays struct {
 
 // Len is how many answers of every map the build has that differ from the host's.
 func (overlays *BuildOverlays) Len() int {
-	return overlays.Defs.Len() + overlays.Uses.Len() + overlays.Implicits.Len() + overlays.Selections.Len() +
-		overlays.Instances.Len()
+	return overlays.Types.Len() + overlays.Defs.Len() + overlays.Uses.Len() + overlays.Implicits.Len() +
+		overlays.Selections.Len() + overlays.Instances.Len()
 }
 
-// maskedAnswer is an answer and the builds it holds in.
+// maskedAnswer is an answer, the builds it holds in, and the order it was written in (see check.recordOrder).
 type maskedAnswer[V any] struct {
 	builds Mask
 	value  V
+	order  int64
 }
+
+// unordered is the order of every write but a Types answer of a constant whose declarations merge across builds'
+// files, which a plain check makes in its group's order and the variational check makes out of it.
+const unordered int64 = -1
 
 // keyAnswers are one key's answers by build. Nearly every key has one, kept inline so the map needs no slice for it.
 type keyAnswers[V any] struct {
@@ -68,21 +74,48 @@ type keyAnswers[V any] struct {
 	more  []maskedAnswer[V]
 }
 
-// with is answers after value is written for builds, which it takes from every earlier answer, as a plain check's later
-// write replaces its earlier one. answers itself is never changed, so an undo can put it back.
-func (answers keyAnswers[V]) with(builds Mask, value V) keyAnswers[V] {
-	if answers.first.builds == 0 || len(answers.more) == 0 && answers.first.builds&^builds == 0 {
-		return keyAnswers[V]{first: maskedAnswer[V]{builds, value}}
+// with is answers after value is written for builds with order: it takes those builds from every earlier answer
+// written at an order no higher, as a plain check's later write replaces its earlier one, and an earlier answer at a
+// higher order keeps its builds (Answers.with). answers itself is never changed, so an undo can put it back.
+func (answers keyAnswers[V]) with(builds Mask, value V, order int64) keyAnswers[V] {
+	if answers.first.builds == 0 ||
+		len(answers.more) == 0 && answers.first.builds&^builds == 0 && answers.first.order <= order {
+		return keyAnswers[V]{first: maskedAnswer[V]{builds, value, order}}
 	}
 	kept := make([]maskedAnswer[V], 0, 2+len(answers.more))
 	for _, earlier := range append([]maskedAnswer[V]{answers.first}, answers.more...) {
-		earlier.builds &^= builds
+		if earlier.builds&builds != 0 {
+			if earlier.order > order {
+				builds &^= earlier.builds
+			} else {
+				earlier.builds &^= builds
+			}
+		}
 		if earlier.builds != 0 {
 			kept = append(kept, earlier)
 		}
 	}
-	kept = append(kept, maskedAnswer[V]{builds, value})
+	if builds != 0 {
+		kept = append(kept, maskedAnswer[V]{builds, value, order})
+	}
+	if len(kept) == 0 {
+		return keyAnswers[V]{}
+	}
 	return keyAnswers[V]{first: kept[0], more: kept[1:]}
+}
+
+// covering is the one answer that holds in every one of builds, and whether one does.
+func (answers keyAnswers[V]) covering(builds Mask) (V, bool) {
+	if answers.first.builds&builds == builds {
+		return answers.first.value, true
+	}
+	for _, answer := range answers.more {
+		if answer.builds&builds == builds {
+			return answer.value, true
+		}
+	}
+	var none V
+	return none, false
 }
 
 // at is the answer that holds in build, and whether one does.
@@ -110,8 +143,9 @@ type infoUndo[K comparable, V any] struct {
 }
 
 // infoAnswers are one Info map's answers by build while the check runs, and what each write inside a unit replaced. An
-// answer that holds in every build goes straight into the caller's map, which is where the host's answers end up, and
-// costs a plain check's write; only a key answered differently by build is staged, and projected when the check ends.
+// answer that holds in every build, written unordered, goes straight into the caller's map, which is where the host's
+// answers end up, and costs a plain check's write; only a key answered differently by build, or written at an order, is
+// staged, and projected when the check ends.
 type infoAnswers[K comparable, V any] struct {
 	plain  map[K]V
 	staged map[K]keyAnswers[V]
@@ -120,8 +154,13 @@ type infoAnswers[K comparable, V any] struct {
 
 // record writes key's answer value for builds, of all the check's builds, keeping what it replaced when undoable.
 func (log *infoAnswers[K, V]) record(key K, value V, builds Mask, all Mask, undoable bool) {
+	log.recordAt(key, value, builds, all, unordered, undoable)
+}
+
+// recordAt is record of an answer written at order.
+func (log *infoAnswers[K, V]) recordAt(key K, value V, builds Mask, all Mask, order int64, undoable bool) {
 	staged, isStaged := log.staged[key]
-	if builds == all && !isStaged {
+	if builds == all && order == unordered && !isStaged {
 		if undoable {
 			previous, had := log.plain[key]
 			log.undo = append(log.undo, infoUndo[K, V]{key: key, hadPlain: had, previousPlain: previous})
@@ -137,11 +176,11 @@ func (log *infoAnswers[K, V]) record(key K, value V, builds Mask, all Mask, undo
 	answers := staged
 	if hadPlain {
 		// The key held one answer in every build; it is staged now, with that answer for the builds this write leaves.
-		answers = keyAnswers[V]{first: maskedAnswer[V]{all, previousPlain}}
+		answers = keyAnswers[V]{first: maskedAnswer[V]{all, previousPlain, unordered}}
 		delete(log.plain, key)
 	}
-	answers = answers.with(builds, value)
-	if len(answers.more) == 0 && answers.first.builds == all {
+	answers = answers.with(builds, value, order)
+	if len(answers.more) == 0 && answers.first.builds == all && answers.first.order == unordered {
 		log.plain[key] = answers.first.value
 		delete(log.staged, key)
 		return
@@ -150,6 +189,14 @@ func (log *infoAnswers[K, V]) record(key K, value V, builds Mask, all Mask, undo
 		log.staged = map[K]keyAnswers[V]{}
 	}
 	log.staged[key] = answers
+}
+
+// covering is key's one answer in every one of builds, and whether one holds.
+func (log *infoAnswers[K, V]) covering(key K, builds Mask) (V, bool) {
+	if value, plain := log.plain[key]; plain {
+		return value, true
+	}
+	return log.staged[key].covering(builds)
 }
 
 // rollback puts back every write after mark.
@@ -233,6 +280,7 @@ func (log *infoAnswers[K, V]) project(all Mask, overlayOf func(build int) *Overl
 
 // infoLogs are the answers of every Info map the check records by build.
 type infoLogs struct {
+	types      infoAnswers[ast.Expr, TypeAndValue]
 	defs       infoAnswers[*ast.Ident, Object]
 	uses       infoAnswers[*ast.Ident, Object]
 	implicits  infoAnswers[ast.Node, Object]
@@ -244,11 +292,11 @@ type infoLogs struct {
 }
 
 // infoMarks are each log's undo length at a unit's start.
-type infoMarks [5]int
+type infoMarks [6]int
 
 func (logs *infoLogs) mark() infoMarks {
 	return infoMarks{len(logs.defs.undo), len(logs.uses.undo), len(logs.implicits.undo), len(logs.selections.undo),
-		len(logs.instances.undo)}
+		len(logs.instances.undo), len(logs.types.undo)}
 }
 
 func (logs *infoLogs) rollback(marks infoMarks) {
@@ -257,6 +305,7 @@ func (logs *infoLogs) rollback(marks infoMarks) {
 	logs.implicits.rollback(marks[2])
 	logs.selections.rollback(marks[3])
 	logs.instances.rollback(marks[4])
+	logs.types.rollback(marks[5])
 }
 
 // keep drops the undo entries after marks, so what they wrote stays whatever happens around them.
@@ -266,6 +315,7 @@ func (logs *infoLogs) keep(marks infoMarks) {
 	logs.implicits.undo = logs.implicits.undo[:marks[2]]
 	logs.selections.undo = logs.selections.undo[:marks[3]]
 	logs.instances.undo = logs.instances.undo[:marks[4]]
+	logs.types.undo = logs.types.undo[:marks[5]]
 }
 
 // infoBuilds is the builds an answer for a key at pos holds in, and whether to keep what it replaces: the current
@@ -285,6 +335,7 @@ func (check *Checker) infoBuilds(pos token.Pos) (Mask, bool) {
 // each file compiles in.
 func (check *Checker) startInfo() {
 	state := check.variational
+	state.info.types.plain = check.Types
 	state.info.defs.plain = check.Defs
 	state.info.uses.plain = check.Uses
 	state.info.implicits.plain = check.Implicits
@@ -306,6 +357,11 @@ func (check *Checker) endInfo() {
 	all := state.all
 	logs := &state.info
 	sameObject := func(left Object, right Object) bool { return left == right }
+	if check.Types != nil {
+		logs.types.project(all, func(build int) *Overlay[ast.Expr, TypeAndValue] {
+			return &variation.Overlays[build].Types
+		}, sameTypeAndValue, nil)
+	}
 	if check.Defs != nil {
 		logs.defs.project(all, func(build int) *Overlay[*ast.Ident, Object] {
 			return &variation.Overlays[build].Defs
@@ -332,6 +388,20 @@ func (check *Checker) endInfo() {
 		}, sameInstance, nil)
 	}
 	state.info = infoLogs{}
+}
+
+// sameTypeAndValue reports whether two answers of an expression are alike: one mode, identical types, and constant
+// values of one kind and one exact value. Each run of a unit makes its own types, so they compare by what they say.
+func sameTypeAndValue(left TypeAndValue, right TypeAndValue) bool {
+	if left.mode != right.mode || (left.Type == nil) != (right.Type == nil) ||
+		(left.Value == nil) != (right.Value == nil) {
+		return false
+	}
+	if left.Type != nil && !Identical(left.Type, right.Type) {
+		return false
+	}
+	return left.Value == nil ||
+		left.Value.Kind() == right.Value.Kind() && left.Value.ExactString() == right.Value.ExactString()
 }
 
 // sameSelection reports whether two selections answer alike: one kind, one object reached the same way, and receivers
