@@ -413,20 +413,25 @@ func AlternatesOf(obj Object) []Object {
 	return nil
 }
 
-// UnderlyingVariant is one of a named type's underlying types, for the merging importer.
+// UnderlyingVariant is one of a named type's underlying types, for the merging importer. A generic type's variant
+// gives the type parameters its underlying type is written in: the named type's own (TypeParams), or type parameters
+// its builds' declarations bind alone, when their constraints differ from the named type's.
 type UnderlyingVariant struct {
 	Builds     Mask
 	Underlying Type
+	TypeParams []*TypeParam
 }
 
-// SetUnderlyingVariants gives n its underlying types by build. Alike ones are kept as one, and when one is left n is
-// left as it is.
+// SetUnderlyingVariants gives n its underlying types by build. Alike ones, identical and written in the same type
+// parameters, are kept as one, and when one is left n is left as it is. Type parameters other than n's own are bound
+// here, once for each variant that gives them.
 func SetUnderlyingVariants(n *Named, variants []UnderlyingVariant) {
 	var alike []UnderlyingVariant
 	for _, variant := range variants {
 		merged := false
 		for index := range alike {
-			if Identical(alike[index].Underlying, variant.Underlying) {
+			if slices.Equal(alike[index].TypeParams, variant.TypeParams) &&
+				Identical(alike[index].Underlying, variant.Underlying) {
 				alike[index].Builds |= variant.Builds
 				merged = true
 				break
@@ -437,11 +442,25 @@ func SetUnderlyingVariants(n *Named, variants []UnderlyingVariant) {
 		}
 	}
 	if len(alike) > 1 {
+		own := n.unpack().tparams
+		// Type parameters given by more than one variant, whose underlying types differ, are bound once.
+		bound := map[*TypeParam]*TypeParamList{}
 		kept := make([]namedVariant, len(alike))
 		for index, variant := range alike {
 			kept[index].mask = variant.Builds
 			kept[index].rhs = variant.Underlying
 			kept[index].underlying.Store(&resolvedUnderlying{variant.Underlying})
+			switch {
+			case len(variant.TypeParams) == 0:
+				// Not generic: written in no type parameters.
+			case slices.Equal(variant.TypeParams, own.list()):
+				kept[index].tparams = own
+			case bound[variant.TypeParams[0]] != nil:
+				kept[index].tparams = bound[variant.TypeParams[0]]
+			default:
+				kept[index].tparams = bindTParams(variant.TypeParams)
+				bound[variant.TypeParams[0]] = kept[index].tparams
+			}
 		}
 		n.variation = &namedVariation{variants: kept}
 	}
@@ -477,7 +496,8 @@ func UnderlyingVariantsOf(n *Named) []UnderlyingVariant {
 	variants := make([]UnderlyingVariant, len(n.variation.variants))
 	for index := range n.variation.variants {
 		variant := &n.variation.variants[index]
-		variants[index] = UnderlyingVariant{Builds: variant.mask, Underlying: variant.rhs}
+		variants[index] = UnderlyingVariant{Builds: variant.mask, Underlying: variant.rhs,
+			TypeParams: variant.tparams.list()}
 	}
 	return variants
 }
