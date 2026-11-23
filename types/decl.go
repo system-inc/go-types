@@ -143,7 +143,7 @@ func (check *Checker) objDecl(obj Object) {
 	check.environment = environment{scope: d.file, version: d.version}
 
 	// cohere's variational spike: each of the object's declarations is checked as a unit under its builds.
-	if variational.active {
+	if check.variational != nil {
 		check.declareVariational(obj, d)
 		return
 	}

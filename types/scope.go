@@ -80,7 +80,7 @@ func (s *Scope) Child(i int) *Scope { return s.children[i] }
 // object exists; otherwise the result is nil.
 func (s *Scope) Lookup(name string) Object {
 	obj := resolve(name, s.elems[name])
-	if obj != nil && variational.active {
+	if obj != nil && runningChecks.Load() > 0 {
 		// cohere's variational spike: an object that exists in only some builds is found in those alone, and another
 		// of the same name may stand in the rest.
 		if !presentHere(variationOf(obj)) {

@@ -10,9 +10,14 @@
 // that never reads a differing property runs once for all of its builds, which is the shared case and nearly every
 // case.
 //
-// The spike checks one package at a time, on one goroutine, so the build set a unit runs under is held here, in
-// package state, and the reads that never see a Checker (Named.Underlying above all) can reach it. Threading it
-// through the checker instead is the full design's work, sized in the spike's report.
+// Many packages are checked at once, each by its own Checker on its own goroutine, so each check holds its own state
+// (variationalState): the checker reaches it directly, and the reads that never see a Checker (Named.Underlying,
+// Object.Type, Const.Val, Scope.Lookup, a method's presence, a type set's memo) find it by the goroutine they run on.
+// A goroutine that runs no variational check finds none and reads every property as its first build's. go/types
+// starts no goroutine inside a check, and the merging importer resolves an object on the goroutine whose check reads
+// it, so a check's reads are all on its goroutine. Threading the state through every such read instead would change
+// 234 declarations and 875 calls of the fork, and every caller of go/types' API beside it (#dfnzqjb, from the
+// concurrency census of #y5mh5he); this finds it on the few reads that meet a property that differs by build.
 
 package types
 
@@ -22,6 +27,8 @@ import (
 	"iter"
 	"math/bits"
 	"slices"
+	"sync"
+	"sync/atomic"
 )
 
 // Mask is a set of builds, bit b for build b. The spike holds at most eight.
@@ -133,14 +140,49 @@ func (answers Answers) with(builds Mask, tv TypeAndValue, order int64) Answers {
 	return result
 }
 
-// variational is the state of the variational check in progress, if any.
-var variational struct {
-	active    bool
+// variationalState is the state of one variational check in progress, held by its Checker.
+type variationalState struct {
 	all       Mask
-	mask      Mask // the builds the current unit runs under
-	depth     int  // how many units are running; a read outside every unit never splits
-	narrowed  uint64
+	mask      Mask   // the builds the current unit runs under
+	depth     int    // how many units are running; a read outside every unit never splits
+	narrowed  uint64 // how many reads have answered for the current unit's builds alone
 	variation *Variation
+	// outer is the check this goroutine was running when this one began, put back when this one ends: an importer
+	// may check a package from source in the middle of another check.
+	outer *variationalState
+}
+
+// runningChecks counts the variational checks in progress anywhere, so a read in a process running none pays one
+// atomic load and nothing more. checksByGoroutine holds each one's state by the goroutine it runs on.
+var (
+	runningChecks     atomic.Int32
+	checksByGoroutine sync.Map // goroutineIdentity() to *variationalState
+)
+
+// runningState is the state of the variational check running on this goroutine, or nil.
+func runningState() *variationalState {
+	if runningChecks.Load() == 0 {
+		return nil
+	}
+	state, _ := checksByGoroutine.Load(goroutineIdentity())
+	running, _ := state.(*variationalState)
+	return running
+}
+
+// readState is the state a read on check's behalf answers under: check's own when check is given, and the goroutine's
+// when it isn't (a type set computed for an interface whose checker is gone).
+func (check *Checker) readState() *variationalState {
+	if check != nil {
+		return check.variational
+	}
+	return runningState()
+}
+
+// recordTypes reports whether check records expressions' types: when its Info has a Types map, and always in a
+// variational check, which records its answers in Variation.Types. go/types skips recording builtins and comma-ok
+// types without it.
+func (check *Checker) recordTypes() bool {
+	return check.Types != nil || check.variational != nil
 }
 
 // splitRequest is the panic a read raises when its answer differs across the current unit's builds: parts are the
@@ -173,10 +215,15 @@ type namedVariation struct {
 }
 
 type namedVariant struct {
-	mask       Mask
-	rhs        Type
-	underlying Type
+	mask Mask
+	rhs  Type
+	// underlying is rhs's underlying type once resolved. Checks of many packages read one named type at once, so it is
+	// kept atomically.
+	underlying atomic.Pointer[resolvedUnderlying]
 }
+
+// resolvedUnderlying holds a namedVariant's resolved underlying type.
+type resolvedUnderlying struct{ underlying Type }
 
 // variationOf is obj's variation, or nil.
 func variationOf(obj Object) *objectVariation {
@@ -238,21 +285,27 @@ type UnderlyingVariant struct {
 // SetUnderlyingVariants gives n its underlying types by build. Alike ones are kept as one, and when one is left n is
 // left as it is.
 func SetUnderlyingVariants(n *Named, variants []UnderlyingVariant) {
-	var kept []namedVariant
+	var alike []UnderlyingVariant
 	for _, variant := range variants {
 		merged := false
-		for index := range kept {
-			if Identical(kept[index].rhs, variant.Underlying) {
-				kept[index].mask |= variant.Builds
+		for index := range alike {
+			if Identical(alike[index].Underlying, variant.Underlying) {
+				alike[index].Builds |= variant.Builds
 				merged = true
 				break
 			}
 		}
 		if !merged {
-			kept = append(kept, namedVariant{mask: variant.Builds, rhs: variant.Underlying, underlying: variant.Underlying})
+			alike = append(alike, variant)
 		}
 	}
-	if len(kept) > 1 {
+	if len(alike) > 1 {
+		kept := make([]namedVariant, len(alike))
+		for index, variant := range alike {
+			kept[index].mask = variant.Builds
+			kept[index].rhs = variant.Underlying
+			kept[index].underlying.Store(&resolvedUnderlying{variant.Underlying})
+		}
 		n.variation = &namedVariation{variants: kept}
 	}
 }
@@ -285,7 +338,8 @@ func UnderlyingVariantsOf(n *Named) []UnderlyingVariant {
 		return nil
 	}
 	variants := make([]UnderlyingVariant, len(n.variation.variants))
-	for index, variant := range n.variation.variants {
+	for index := range n.variation.variants {
+		variant := &n.variation.variants[index]
 		variants[index] = UnderlyingVariant{Builds: variant.mask, Underlying: variant.rhs}
 	}
 	return variants
@@ -316,13 +370,13 @@ func sameAnswer(left objectVariant, right objectVariant) bool {
 	return left.val == nil || left.val.Kind() == right.val.Kind() && left.val.ExactString() == right.val.ExactString()
 }
 
-// splitAt raises a split of the current unit's builds into parts, plus whatever of them no part holds.
-func splitAt(parts []Mask) {
+// splitAt raises a split of state's current unit's builds into parts, plus whatever of them no part holds.
+func splitAt(state *variationalState, parts []Mask) {
 	covered := Mask(0)
 	for _, part := range parts {
 		covered |= part
 	}
-	if rest := variational.mask &^ covered; rest != 0 {
+	if rest := state.mask &^ covered; rest != 0 {
 		parts = append(parts, rest)
 	}
 	panic(splitRequest{parts: parts})
@@ -330,16 +384,17 @@ func splitAt(parts []Mask) {
 
 // Outside runs work as if no unit were running, so no read inside it splits: for the merging importer, which resolves
 // an imported object the first time a unit reads it, and would be left half done by a split's panic. A unit that reads
-// the object afterwards answers for its own builds as always. Outside every unit it writes nothing, so goroutines
-// that resolve imported objects while no check runs share no write.
+// the object afterwards answers for its own builds as always. It writes only the state of the check running on its
+// own goroutine, and nothing when none is in a unit, so goroutines that resolve imported objects share no write.
 func Outside(work func()) {
-	if variational.depth == 0 {
+	state := runningState()
+	if state == nil || state.depth == 0 {
 		work()
 		return
 	}
-	savedDepth := variational.depth
-	variational.depth = 0
-	defer func() { variational.depth = savedDepth }()
+	savedDepth := state.depth
+	state.depth = 0
+	defer func() { state.depth = savedDepth }()
 	work()
 }
 
@@ -358,19 +413,28 @@ func CompleteWithMethods(iface *Interface, methods []*Func) {
 	iface.tset = &_TypeSet{methods: sorted, terms: allTermlist}
 }
 
-// readingVariation reports whether a read must answer by build: a variational check is in a unit.
-func readingVariation() bool {
-	return variational.active && variational.depth > 0
+// readingState is the state of the variational check running on this goroutine when a read must answer by build,
+// since the check is in a unit, and nil when it needn't.
+func readingState() *variationalState {
+	state := runningState()
+	if state == nil || state.depth == 0 {
+		return nil
+	}
+	return state
 }
 
 // pickObjectVariant is the answer of obj's variation for the current unit's builds, splitting the unit when they
 // differ.
 func pickObjectVariant(variation *objectVariation) (objectVariant, bool) {
-	if variation == nil || len(variation.variants) == 0 || !readingVariation() {
+	if variation == nil || len(variation.variants) == 0 {
 		return objectVariant{}, false
 	}
-	variational.narrowed++
-	mask := variational.mask
+	state := readingState()
+	if state == nil {
+		return objectVariant{}, false
+	}
+	state.narrowed++
+	mask := state.mask
 	first := -1
 	var parts []Mask
 	for index, variant := range variation.variants {
@@ -383,14 +447,14 @@ func pickObjectVariant(variation *objectVariation) (objectVariant, bool) {
 		}
 	}
 	if len(parts) > 1 {
-		splitAt(parts)
+		splitAt(state, parts)
 	}
 	if first < 0 {
 		return variation.variants[0], true
 	}
 	if variation.variants[first].mask&mask != mask {
 		// The answer holds in some of the unit's builds and the object is absent in the rest.
-		splitAt(parts)
+		splitAt(state, parts)
 	}
 	return variation.variants[first], true
 }
@@ -398,17 +462,21 @@ func pickObjectVariant(variation *objectVariation) (objectVariant, bool) {
 // presentHere reports whether an object with variation exists in the current unit's builds: true in all of them,
 // false in none, and a split when only some.
 func presentHere(variation *objectVariation) bool {
-	if variation == nil || variation.presence == 0 || !readingVariation() {
+	if variation == nil || variation.presence == 0 {
 		return true
 	}
-	mask := variational.mask
+	state := readingState()
+	if state == nil {
+		return true
+	}
+	mask := state.mask
 	switch {
 	case mask&variation.presence == mask:
 		return true
 	case mask&variation.presence == 0:
 		return false
 	default:
-		splitAt([]Mask{mask & variation.presence, mask &^ variation.presence})
+		splitAt(state, []Mask{mask & variation.presence, mask &^ variation.presence})
 		return false
 	}
 }
@@ -416,37 +484,44 @@ func presentHere(variation *objectVariation) bool {
 // pickUnderlying is n's underlying type in the current unit's builds, splitting the unit when they differ.
 func (n *Named) pickUnderlying() Type {
 	variation := n.variation
-	if !readingVariation() {
-		return variation.variants[0].resolved(n)
+	state := readingState()
+	if state == nil {
+		return variation.variants[0].resolved(state)
 	}
-	variational.narrowed++
-	mask := variational.mask
+	state.narrowed++
+	mask := state.mask
 	first := -1
 	var parts []Mask
-	for index, variant := range variation.variants {
-		if variant.mask&mask == 0 {
+	for index := range variation.variants {
+		builds := variation.variants[index].mask & mask
+		if builds == 0 {
 			continue
 		}
-		parts = append(parts, variant.mask&mask)
+		parts = append(parts, builds)
 		if first < 0 {
 			first = index
 		}
 	}
 	if len(parts) > 1 {
-		splitAt(parts)
+		splitAt(state, parts)
 	}
 	if first < 0 {
 		first = 0
 	}
-	return variation.variants[first].resolved(n)
+	return variation.variants[first].resolved(state)
 }
 
-// resolved is variant's underlying type, following its right-hand side through aliases and named types.
-func (variant *namedVariant) resolved(n *Named) Type {
-	if variant.underlying != nil {
-		return variant.underlying
+// resolved is variant's underlying type, following its right-hand side through aliases and named types, read under
+// state, the check reading in a unit, or nil. It is kept once a read in a unit finds it with nothing inside narrowed,
+// so an answer that holds in only some builds is never kept for all of them.
+func (variant *namedVariant) resolved(state *variationalState) Type {
+	if kept := variant.underlying.Load(); kept != nil {
+		return kept.underlying
 	}
-	before := variational.narrowed
+	var before uint64
+	if state != nil {
+		before = state.narrowed
+	}
 	var underlying Type
 	switch rhs := Unalias(variant.rhs).(type) {
 	case *Named:
@@ -456,8 +531,8 @@ func (variant *namedVariant) resolved(n *Named) Type {
 	default:
 		underlying = rhs.Underlying()
 	}
-	if variational.narrowed == before {
-		variant.underlying = underlying
+	if state != nil && state.narrowed == before {
+		variant.underlying.Store(&resolvedUnderlying{underlying})
 	}
 	return underlying
 }
@@ -482,7 +557,7 @@ type vundo struct {
 }
 
 // runUnit runs run once for builds, or once for each group of them that answers alike when a read inside splits it;
-// run reads the group it runs for from variational.mask. A declaration unit's work outlives any unit around it that
+// run reads the group it runs for from check.variational.mask. A declaration unit's work outlives any unit around it that
 // restarts, since a declared object is never declared again; an action unit's is redone with the unit around it.
 func (check *Checker) runUnit(builds Mask, run func(), declaration bool) {
 	split := check.tryUnit(builds, run, declaration)
@@ -503,18 +578,18 @@ func (check *Checker) runUnit(builds Mask, run func(), declaration bool) {
 // run changed: its answers, its delayed actions, its untyped expressions, its object path and its environment. What a
 // finished declaration inside it did is kept.
 func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split []Mask) {
-	savedMask := variational.mask
+	savedMask := check.variational.mask
 	savedUndo := len(check.vundo)
 	savedDelayed := len(check.delayed)
 	savedUntyped := len(check.untypedLog)
 	savedPositions := len(check.posStack)
 	savedPath := len(check.objPath)
 	savedEnvironment := check.environment
-	variational.mask = builds
-	variational.depth++
+	check.variational.mask = builds
+	check.variational.depth++
 	defer func() {
-		variational.depth--
-		variational.mask = savedMask
+		check.variational.depth--
+		check.variational.mask = savedMask
 		recovered := recover()
 		if recovered == nil {
 			return
@@ -523,7 +598,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 		if !isSplit {
 			panic(recovered)
 		}
-		types := variational.variation.Types
+		types := check.variational.variation.Types
 		for index := len(check.vundo) - 1; index >= savedUndo; index-- {
 			undo := check.vundo[index]
 			if undo.had {
@@ -547,13 +622,13 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 			check.pop()
 		}
 		check.environment = savedEnvironment
-		variational.variation.Restarts++
+		check.variational.variation.Restarts++
 		split = request.parts
 	}()
 	run()
 	check.flushUntyped(savedUntyped)
 	// A finished declaration's answers stay whatever happens around it, and nothing undoes a unit no other holds.
-	if declaration || variational.depth == 1 {
+	if declaration || check.variational.depth == 1 {
 		check.vundo = check.vundo[:savedUndo]
 	}
 	if declaration {
@@ -561,7 +636,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 			check.delayed[index].persistent = true
 		}
 	}
-	variational.variation.Units++
+	check.variational.variation.Units++
 	return nil
 }
 
@@ -582,13 +657,13 @@ func (check *Checker) flushUntyped(from int) {
 // recordVariational writes x's answer for the current unit's builds, keeping what it replaced while a unit runs that
 // could restart.
 func (check *Checker) recordVariational(x ast.Expr, tv TypeAndValue) {
-	mask := variational.all
-	if variational.depth > 0 {
-		mask = variational.mask
+	mask := check.variational.all
+	if check.variational.depth > 0 {
+		mask = check.variational.mask
 	}
-	types := variational.variation.Types
+	types := check.variational.variation.Types
 	previous, had := types[x]
-	if variational.depth > 0 {
+	if check.variational.depth > 0 {
 		check.vundo = append(check.vundo, vundo{expr: x, had: had, previous: previous})
 	}
 	types[x] = previous.with(mask, tv, check.recordOrder)
@@ -608,11 +683,13 @@ func (check *Checker) startVariational() bool {
 	if variation.Types == nil {
 		variation.Types = map[ast.Expr]Answers{}
 	}
-	variational.active = true
-	variational.all = variation.Builds
-	variational.mask = variation.Builds
-	variational.depth = 0
-	variational.variation = variation
+	check.variational = &variationalState{all: variation.Builds, mask: variation.Builds, variation: variation}
+	goroutine := goroutineIdentity()
+	if outer, running := checksByGoroutine.Load(goroutine); running {
+		check.variational.outer = outer.(*variationalState)
+	}
+	checksByGoroutine.Store(goroutine, check.variational)
+	runningChecks.Add(1)
 	check.recordOrder = -1
 	return true
 }
@@ -620,8 +697,14 @@ func (check *Checker) startVariational() bool {
 // endVariational ends the check. Its answers are already in the variation, written as they came.
 func (check *Checker) endVariational() {
 	check.vundo = nil
-	variational.active = false
-	variational.variation = nil
+	goroutine := goroutineIdentity()
+	if outer := check.variational.outer; outer != nil {
+		checksByGoroutine.Store(goroutine, outer)
+	} else {
+		checksByGoroutine.Delete(goroutine)
+	}
+	runningChecks.Add(-1)
+	check.variational = nil
 }
 
 // buildCount is how many builds mask holds.
@@ -638,13 +721,13 @@ const (
 // builds and are of one kind, so the name is one object with a declaration for each. A name's first object only notes
 // the builds it exists in. Objects of one name in overlapping builds are left to be redeclarations, as always.
 func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) int {
-	if !variational.active || obj.Name() == "_" {
+	if check.variational == nil || obj.Name() == "_" {
 		return variantNew
 	}
 	base := obj.(interface{ base() *object }).base()
 	first := check.pkg.scope.elems[obj.Name()]
 	if first == nil {
-		if d.mask != variational.all {
+		if d.mask != check.variational.all {
 			base.ensureVariation().presence = d.mask
 		}
 		return variantNew
@@ -677,7 +760,7 @@ func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) in
 	}
 	firstVariation.decls = append(firstVariation.decls, declVariant{mask: d.mask, decl: d, iota: iotaOf(obj)})
 	firstVariation.presence |= d.mask
-	if firstVariation.presence == variational.all {
+	if firstVariation.presence == check.variational.all {
 		firstVariation.presence = 0
 	}
 	check.recordDef(ident, first)
@@ -687,7 +770,7 @@ func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) in
 // mergeMethodVariant folds method into the method of its name among methods when they are declared in disjoint
 // builds, and reports whether it did.
 func (check *Checker) mergeMethodVariant(methods []*Func, method *Func) bool {
-	if !variational.active {
+	if check.variational == nil {
 		return false
 	}
 	d := check.objMap[method]
@@ -709,14 +792,14 @@ func (check *Checker) mergeMethodVariant(methods []*Func, method *Func) bool {
 		}
 		variation.decls = append(variation.decls, declVariant{mask: d.mask, decl: d})
 		variation.presence |= d.mask
-		if variation.presence == variational.all {
+		if variation.presence == check.variational.all {
 			variation.presence = 0
 		}
 		delete(check.objMap, method)
 		check.recordDef(d.fdecl.Name, first)
 		return true
 	}
-	if d.mask != variational.all {
+	if d.mask != check.variational.all {
 		method.ensureVariation().presence = d.mask
 	}
 	return false
@@ -757,7 +840,7 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 	} else {
 		mask := d.mask
 		if mask == 0 {
-			mask = variational.all
+			mask = check.variational.all
 		}
 		decls = []declVariant{{mask: mask, decl: d, iota: iotaOf(obj)}}
 	}
@@ -782,7 +865,7 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 	for _, declared := range decls {
 		every |= declared.mask
 		check.runUnit(declared.mask, func() {
-			builds := variational.mask
+			builds := check.variational.mask
 			base.typ = nil
 			for _, sibling := range siblings {
 				sibling.typ = nil
@@ -856,10 +939,10 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 			base.typ = named
 		}
 		// Methods are collected once, for every build the type is declared in.
-		saved := variational.mask
-		variational.mask = every
+		saved := check.variational.mask
+		check.variational.mask = every
 		check.collectMethods(typeName)
-		variational.mask = saved
+		check.variational.mask = saved
 		return
 	}
 	if len(collapsed) == 0 {
@@ -921,12 +1004,12 @@ func freshBodyScope(sig *Signature) {
 // rewriteCommaOk is recordCommaOkTypes for a variational check without a Types map: x's answer for the current
 // unit's builds, and each parenthesized expression inside it, becomes the comma-ok tuple.
 func (check *Checker) rewriteCommaOk(x ast.Expr, t0 Type, t1 Type) {
-	mask := variational.all
-	if variational.depth > 0 {
-		mask = variational.mask
+	mask := check.variational.all
+	if check.variational.depth > 0 {
+		mask = check.variational.mask
 	}
 	for {
-		for answer := range variational.variation.Types[x].All() {
+		for answer := range check.variational.variation.Types[x].All() {
 			if answer.Builds&mask == mask {
 				tv := answer.TypeAndValue
 				pos := x.Pos()
