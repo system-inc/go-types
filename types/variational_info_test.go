@@ -14,24 +14,26 @@ import (
 
 // projectionFixtures are the fixtures whose projection to each build is compared with that build's plain check.
 var projectionFixtures = map[string][]fixtureFile{
-	"spike":             fixtureFiles,
-	"hard":              hardFiles,
-	"usage":             usageFiles,
-	"methods":           methodOrderFiles,
-	"abandoned errors":  abandonedErrorFiles,
-	"alias targets":     aliasTargetFiles,
-	"generic types":     genericDefinitionFiles,
-	"kinds":             kindFiles,
-	"scopes":            scopeFiles,
-	"init order":        initOrderFiles,
-	"imports":           importFiles,
-	"interfaces":        interfaceFiles,
-	"sizes":             sizeFiles,
-	"method signatures": methodSignatureFiles,
-	"pairs":             pairFiles,
-	"defined over":      definedOverFiles,
-	"field methods":     fieldMethodFiles,
-	"closures":          closureFiles,
+	"spike":              fixtureFiles,
+	"hard":               hardFiles,
+	"usage":              usageFiles,
+	"methods":            methodOrderFiles,
+	"abandoned errors":   abandonedErrorFiles,
+	"alias targets":      aliasTargetFiles,
+	"generic types":      genericDefinitionFiles,
+	"kinds":              kindFiles,
+	"scopes":             scopeFiles,
+	"init order":         initOrderFiles,
+	"imports":            importFiles,
+	"interfaces":         interfaceFiles,
+	"sizes":              sizeFiles,
+	"method signatures":  methodSignatureFiles,
+	"pairs":              pairFiles,
+	"defined over":       definedOverFiles,
+	"field methods":      fieldMethodFiles,
+	"closures":           closureFiles,
+	"literal parameters": literalParameterFiles,
+	"imported goos":      importedGOOSFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires
@@ -74,9 +76,10 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			for index, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
 				spelling.build = build
 				plain := fullInfo()
-				plainPackage, checkError := (&types.Config{Importer: fixtureImporter{}, Error: func(diagnostic error) {
+				plainConfiguration := &types.Config{Importer: fixtureImporter{build}, Error: func(diagnostic error) {
 					plainDiagnostics[build] = append(plainDiagnostics[build], diagnostic.Error())
-				}}).Check("fork", fileSet, parsed.filesIn(build), plain)
+				}}
+				plainPackage, checkError := plainConfiguration.Check("fork", fileSet, parsed.filesIn(build), plain)
 				if checkError != nil && len(plainDiagnostics[build]) == 0 {
 					test.Fatalf("plain check of build %03b: %v", build, checkError)
 				}
@@ -89,11 +92,14 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 					overlaid += overlays.Len()
 				}
 				label := fmt.Sprintf("build %03b", build)
-				requireDeclaredObjects(test, label+" plain", fileSet, plain.Defs, plain.Uses, plain.Implicits,
-					plain.Selections, plain.Scopes)
-				requireDeclaredObjects(test, label, fileSet, project(info.Defs, overlays.Defs),
-					project(info.Uses, overlays.Uses), project(info.Implicits, overlays.Implicits),
-					project(info.Selections, overlays.Selections), project(info.Scopes, overlays.Scopes))
+				requireDeclaredObjects(test, label+" plain", fileSet, plain.Types, plain.Defs, plain.Uses,
+					plain.Implicits, plain.Selections, plain.Scopes)
+				requireDeclaredObjects(test, label, fileSet, project(info.Types, overlays.Types),
+					project(info.Defs, overlays.Defs), project(info.Uses, overlays.Uses),
+					project(info.Implicits, overlays.Implicits), project(info.Selections, overlays.Selections),
+					project(info.Scopes, overlays.Scopes))
+				requireUsedParameters(test, label, fileSet, project(info.Defs, overlays.Defs),
+					project(info.Uses, overlays.Uses), plain.Defs, plain.Uses)
 				// What the projection answers is read as the build has it: one interface's type set differs by build.
 				types.InBuild(build, func() {
 					compareSpelled(test, label+" Defs", spellObjects(spelling, project(info.Defs, overlays.Defs)),
@@ -329,12 +335,111 @@ func Cases() (total int) {
 	{"n_windows.go", buildWindows, "package fork\n\nconst N = 3\n"},
 }
 
-// requireDeclaredObjects requires each object that uses, implicits, selections and scopes name, when it is declared
-// in the package's own files, to be one that defs or implicits declare: a build's answers name its own objects, never
-// another run's. A field or method of an instance is its origin's.
-func requireDeclaredObjects(test *testing.T, label string, fileSet *token.FileSet, defs map[*ast.Ident]types.Object,
-	uses map[*ast.Ident]types.Object, implicits map[ast.Node]types.Object,
-	selections map[*ast.SelectorExpr]*types.Selection, scopes map[ast.Node]*types.Scope,
+// literalParameterFiles are cohere-dev's main_test.go's shape: a body that opens reading a string constant which
+// differs in every build, so it splits into a run for each, and then declares func literals whose parameters only
+// their own bodies use, a nested literal inside one, and a deferred literal.
+var literalParameterFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+func Body() (string, error) {
+	if GOOS == "windows" {
+		return "", nil
+	}
+	run := func(arguments ...string) (string, error) {
+		joined := ""
+		for _, argument := range arguments {
+			joined += argument
+		}
+		check := func(value string) bool { return value != "" }
+		if !check(joined) {
+			return "", nil
+		}
+		return joined, nil
+	}
+	defer func(reason string) { _ = reason }("done")
+	waitFor := func(what string, done func() bool) bool { return what != "" && done() }
+	first, _ := run("a")
+	if !waitFor(first, func() bool { return true }) {
+		return "", nil
+	}
+	return run(first, "b")
+}
+`},
+	{"goos_darwin.go", buildDarwin, "package fork\n\nconst GOOS = \"darwin\"\n"},
+	{"goos_linux.go", buildLinux, "package fork\n\nconst GOOS = \"linux\"\n"},
+	{"goos_windows.go", buildWindows, "package fork\n\nconst GOOS = \"windows\"\n"},
+}
+
+// importedGOOSFiles are literalParameterFiles with the split at an imported constant, runtime.GOOS, whose value the
+// merging importer gives by build, as cohere-dev's main_test.go has it.
+var importedGOOSFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+import "example/runtime"
+
+func Body() (string, error) {
+	if runtime.GOOS == "windows" {
+		return "", nil
+	}
+	run := func(arguments ...string) (string, error) {
+		joined := ""
+		for _, argument := range arguments {
+			joined += argument
+		}
+		check := func(value string) bool { return value != "" }
+		if !check(joined) {
+			return "", nil
+		}
+		return joined, nil
+	}
+	defer func(reason string) { _ = reason }("done")
+	waitFor := func(what string, done func() bool) bool { return what != "" && done() }
+	first, _ := run("a")
+	if !waitFor(first, func() bool { return true }) {
+		return "", nil
+	}
+	return run(first, "b")
+}
+`},
+	{"build_darwin.go", buildDarwin, "package fork\n"},
+	{"build_linux.go", buildLinux, "package fork\n"},
+	{"build_windows.go", buildWindows, "package fork\n"},
+}
+
+// requireUsedParameters requires each parameter the build's projected Defs declare, when the build's plain check
+// uses the parameter declared at its place, to be used in the projection too, as an unused-parameter report reads it.
+func requireUsedParameters(test *testing.T, label string, fileSet *token.FileSet, defs map[*ast.Ident]types.Object,
+	uses map[*ast.Ident]types.Object, plainDefs map[*ast.Ident]types.Object, plainUses map[*ast.Ident]types.Object,
+) {
+	test.Helper()
+	plainUsed := map[string]bool{}
+	for _, object := range plainUses {
+		plainUsed[fileSet.Position(object.Pos()).String()] = true
+	}
+	used := map[types.Object]bool{}
+	for _, object := range uses {
+		used[object] = true
+	}
+	for ident, object := range defs {
+		variable, isVariable := object.(*types.Var)
+		if !isVariable || variable.Kind() != types.ParamVar || used[object] {
+			continue
+		}
+		if place := fileSet.Position(ident.Pos()).String(); plainUsed[place] {
+			test.Errorf("%s: parameter %s declared at %s has no use, and the plain check uses it", label,
+				variable.Name(), place)
+		}
+	}
+}
+
+// requireDeclaredObjects requires each object that uses, implicits, selections and scopes name, and each parameter
+// and result of a func literal's signature in typesOf, when it is declared in the package's own files, to be one that
+// defs or implicits declare: a build's answers name its own objects, never another run's. A field or method of an
+// instance is its origin's. An unused-parameter report reads a literal's parameters from its type.
+func requireDeclaredObjects(test *testing.T, label string, fileSet *token.FileSet,
+	typesOf map[ast.Expr]types.TypeAndValue, defs map[*ast.Ident]types.Object, uses map[*ast.Ident]types.Object,
+	implicits map[ast.Node]types.Object, selections map[*ast.SelectorExpr]*types.Selection,
+	scopes map[ast.Node]*types.Scope,
 ) {
 	test.Helper()
 	declared := map[types.Object]bool{}
@@ -370,6 +475,21 @@ func requireDeclaredObjects(test *testing.T, label string, fileSet *token.FileSe
 	for node, scope := range scopes {
 		for _, name := range scope.Names() {
 			require("the scope at "+fileSet.Position(node.Pos()).String(), scope.Lookup(name))
+		}
+	}
+	for expression, answer := range typesOf {
+		if _, isLiteral := expression.(*ast.FuncLit); !isLiteral {
+			continue
+		}
+		signature, isSignature := answer.Type.(*types.Signature)
+		if !isSignature {
+			continue
+		}
+		for _, tuple := range []*types.Tuple{signature.Params(), signature.Results()} {
+			for index := range tuple.Len() {
+				require("the type of the func literal at "+fileSet.Position(expression.Pos()).String(),
+					tuple.At(index))
+			}
 		}
 	}
 }

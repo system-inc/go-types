@@ -3,6 +3,7 @@ package types_test
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
 	"sort"
@@ -101,16 +102,43 @@ const Separator = '/'
 `},
 }
 
-// fixtureImporter imports unsafe, and any other path as an empty package of its own, which a fixture imports blank.
-type fixtureImporter struct{}
+// fixtureImporter imports unsafe, example/runtime (declareGOOS), and any other path as an empty package of its own,
+// which a fixture imports blank. build is the build a plain check imports for, zero for a variational check.
+type fixtureImporter struct{ build types.Mask }
 
-func (fixtureImporter) Import(path string) (*types.Package, error) {
+func (importer fixtureImporter) Import(path string) (*types.Package, error) {
 	if path == "unsafe" {
 		return types.Unsafe, nil
 	}
 	imported := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
+	if path == "example/runtime" {
+		importer.declareGOOS(imported)
+	}
 	imported.MarkComplete()
 	return imported, nil
+}
+
+// goosByBuild is each build's GOOS, which example/runtime declares.
+var goosByBuild = map[types.Mask]string{buildDarwin: "darwin", buildLinux: "linux", buildWindows: "windows"}
+
+// declareGOOS declares example/runtime's GOOS, a constant whose value is each build's own name, as runtime's is: the
+// build's alone for a plain check's import, and every build's, by build, as the merging importer gives it, for a
+// variational check's.
+func (importer fixtureImporter) declareGOOS(imported *types.Package) {
+	goos := types.NewConst(token.NoPos, imported, "GOOS", types.Typ[types.UntypedString],
+		constant.MakeString(goosByBuild[buildDarwin]))
+	if importer.build != 0 {
+		goos = types.NewConst(token.NoPos, imported, "GOOS", types.Typ[types.UntypedString],
+			constant.MakeString(goosByBuild[importer.build]))
+	} else {
+		var variants []types.Variant
+		for build, name := range goosByBuild {
+			variants = append(variants, types.Variant{Builds: build, Type: types.Typ[types.UntypedString],
+				Value: constant.MakeString(name)})
+		}
+		types.SetVariants(goos, variants)
+	}
+	imported.Scope().Insert(goos)
 }
 
 // answer spells a recorded type and value as the census compares them.

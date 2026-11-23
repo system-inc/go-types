@@ -441,18 +441,63 @@ func (check *Checker) endInfo() {
 	state.info = infoLogs{}
 }
 
-// sameTypeAndValue reports whether two answers of an expression are alike: one mode, identical types, and constant
-// values of one kind and one exact value. Each run of a unit makes its own types, so they compare by what they say.
+// sameTypeAndValue reports whether two answers of an expression are alike: one mode, identical types declaring the
+// same objects (sameDeclaredObjects), and constant values of one kind and one exact value. Each run of a unit makes
+// its own types, so they compare by what they say, and by the objects they declare.
 func sameTypeAndValue(left TypeAndValue, right TypeAndValue) bool {
 	if left.mode != right.mode || (left.Type == nil) != (right.Type == nil) ||
 		(left.Value == nil) != (right.Value == nil) {
 		return false
 	}
-	if left.Type != nil && !Identical(left.Type, right.Type) {
+	if left.Type != nil && (!Identical(left.Type, right.Type) || !sameDeclaredObjects(left.Type, right.Type)) {
 		return false
 	}
 	return left.Value == nil ||
 		left.Value.Kind() == right.Value.Kind() && left.Value.ExactString() == right.Value.ExactString()
+}
+
+// sameDeclaredObjects reports whether two identical types declare the same objects: a signature's parameters and
+// results, a struct's fields, an interface's explicit methods, through pointers, slices, arrays, maps and channels.
+// Each run of a unit declares its own (a func literal's parameters), so identical types from two runs are two
+// answers: a build answered with another run's signature reads parameters its own Defs never declare.
+func sameDeclaredObjects(left Type, right Type) bool {
+	if left == right {
+		return true
+	}
+	sameTuple := func(left *Tuple, right *Tuple) bool {
+		if left.Len() != right.Len() {
+			return false
+		}
+		for index := range left.Len() {
+			if left.At(index) != right.At(index) {
+				return false
+			}
+		}
+		return true
+	}
+	switch left := left.(type) {
+	case *Signature:
+		right := right.(*Signature)
+		return sameTuple(left.params, right.params) && sameTuple(left.results, right.results)
+	case *Struct:
+		right := right.(*Struct)
+		return slices.Equal(left.fields, right.fields)
+	case *Interface:
+		right := right.(*Interface)
+		return slices.Equal(left.methods, right.methods)
+	case *Pointer:
+		return sameDeclaredObjects(left.base, right.(*Pointer).base)
+	case *Slice:
+		return sameDeclaredObjects(left.elem, right.(*Slice).elem)
+	case *Array:
+		return sameDeclaredObjects(left.elem, right.(*Array).elem)
+	case *Chan:
+		return sameDeclaredObjects(left.elem, right.(*Chan).elem)
+	case *Map:
+		right := right.(*Map)
+		return sameDeclaredObjects(left.key, right.key) && sameDeclaredObjects(left.elem, right.elem)
+	}
+	return true
 }
 
 // typeFolds map what an answer folded into an alike answer of another run declares (its fields, an interface's
