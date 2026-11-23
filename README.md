@@ -7,7 +7,8 @@ commits on top of it.
 
 ## Where it comes from
 
-Taken at go1.27.1, upstream commit `862c888e612ac346c7c4d99c9392bdfd265f33b0` ("[release-branch.go1.27] go1.27.1").
+Taken at go1.27.4, upstream commit `7b2881024c95a11ddb86663a616340aa3a88b67f` ("[release-branch.go1.27] go1.27.4"), laid
+over go1.27.1 (`862c888e612ac346c7c4d99c9392bdfd265f33b0`), the first commit's release.
 Test files and testdata are left out.
 
 | Here | Upstream |
