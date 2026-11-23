@@ -114,6 +114,10 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 					if got, want := importPaths(imports), importPaths(plainPackage.Imports()); got != want {
 						test.Errorf("%s Imports: projected %s, plain %s", label, got, want)
 					}
+					// Read as the build, the package's own Imports are the build's, with no overlay.
+					if got, want := importPaths(checked.Imports()), importPaths(plainPackage.Imports()); got != want {
+						test.Errorf("%s Imports read in the build: %s, plain %s", label, got, want)
+					}
 				})
 			}
 			compareDiagnostics(test, published, plainDiagnostics)

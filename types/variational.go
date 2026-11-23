@@ -330,7 +330,8 @@ func (state *variationalState) noteImport(imported *Package, builds Mask) {
 }
 
 // endImports gives the checked package the host's (build 0's) imports, and each other build whose imports differ its
-// own in its overlay, as each build's plain check lists them.
+// own in its overlay, as each build's plain check lists them. The package keeps every build's, which Imports answers
+// under InBuild.
 func (check *Checker) endImports() {
 	state := check.variational
 	if state.all&1 == 0 {
@@ -338,12 +339,18 @@ func (check *Checker) endImports() {
 	}
 	host := state.imports[0]
 	check.pkg.imports = host
-	for build := 1; build < 8; build++ {
-		if state.all&(1<<build) != 0 && !slices.Equal(state.imports[build], host) {
-			// An overlay's imports are nil only when they are the host's, so an empty list is kept empty.
-			state.variation.Overlays[build].Imports = append([]*Package{}, state.imports[build]...)
+	var byBuild [8][]*Package
+	for build := range 8 {
+		if state.all&(1<<build) == 0 {
+			continue
+		}
+		// A list is nil only for a build the check doesn't cover, so an empty one is kept empty.
+		byBuild[build] = append([]*Package{}, state.imports[build]...)
+		if build > 0 && !slices.Equal(state.imports[build], host) {
+			state.variation.Overlays[build].Imports = byBuild[build]
 		}
 	}
+	check.pkg.importsByBuild = &byBuild
 }
 
 // depUndo is what one dependency write replaced, so a unit that restarts can put it back.

@@ -9,6 +9,7 @@ package types
 
 import (
 	"fmt"
+	"math/bits"
 )
 
 // A Package describes a Go package.
@@ -21,6 +22,9 @@ type Package struct {
 	fake      bool   // scope lookup errors are silently dropped if package is fake (internal use only)
 	cgo       bool   // uses of this package will be rewritten into uses of declarations from _cgo_gotypes.go
 	goVersion string // minimum Go version required for package (by Config.GoVersion, typically from go.mod)
+	// cohere's variational spike: a variationally checked package's imports in each build, which Imports answers
+	// under InBuild; nil for every other package
+	importsByBuild *[8][]*Package
 }
 
 // NewPackage returns a new Package for the given package path and name.
@@ -72,7 +76,18 @@ func (pkg *Package) MarkComplete() { pkg.complete = true }
 //
 // If pkg uses cgo and the FakeImportC configuration option
 // was enabled, the imports list may contain a fake "C" package.
-func (pkg *Package) Imports() []*Package { return pkg.imports }
+func (pkg *Package) Imports() []*Package {
+	// cohere's variational spike: read as one build (InBuild), a variationally checked package's imports are the
+	// build's.
+	if pkg.importsByBuild != nil && runningChecks.Load() > 0 {
+		if state := runningState(); state != nil && state.inBuild {
+			if imports := pkg.importsByBuild[bits.TrailingZeros8(uint8(state.mask))]; imports != nil {
+				return imports
+			}
+		}
+	}
+	return pkg.imports
+}
 
 // SetImports sets the list of explicitly imported packages to list.
 // It is the caller's responsibility to make sure list elements are unique.
