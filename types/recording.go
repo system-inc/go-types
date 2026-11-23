@@ -148,7 +148,7 @@ func (check *Checker) recordInstance(expr ast.Expr, targs []Type, typ Type) {
 			m = map[*ast.Ident]Instance{}
 			defer func() {
 				builds, undoable := check.infoBuilds(ident.Pos())
-				check.variational.info.instances.record(ident, m[ident], builds, undoable)
+				check.variational.info.instances.record(ident, m[ident], builds, check.variational.all, undoable)
 			}()
 		}
 		// If this is an instance of a method value/expression, replace the
@@ -178,7 +178,7 @@ func (check *Checker) recordDef(id *ast.Ident, obj Object) {
 		// cohere's variational spike: a variational check keeps each Info answer by build until it ends.
 		if check.variational != nil {
 			builds, undoable := check.infoBuilds(id.Pos())
-			check.variational.info.defs.record(id, obj, builds, undoable)
+			check.variational.info.defs.record(id, obj, builds, check.variational.all, undoable)
 			return
 		}
 		m[id] = obj
@@ -191,7 +191,7 @@ func (check *Checker) recordUse(id *ast.Ident, obj Object) {
 	if m := check.Uses; m != nil {
 		if check.variational != nil {
 			builds, undoable := check.infoBuilds(id.Pos())
-			check.variational.info.uses.record(id, obj, builds, undoable)
+			check.variational.info.uses.record(id, obj, builds, check.variational.all, undoable)
 			return
 		}
 		m[id] = obj
@@ -204,7 +204,7 @@ func (check *Checker) recordImplicit(node ast.Node, obj Object) {
 	if m := check.Implicits; m != nil {
 		if check.variational != nil {
 			builds, undoable := check.infoBuilds(node.Pos())
-			check.variational.info.implicits.record(node, obj, builds, undoable)
+			check.variational.info.implicits.record(node, obj, builds, check.variational.all, undoable)
 			return
 		}
 		m[node] = obj
@@ -217,7 +217,7 @@ func (check *Checker) recordSelection(x *ast.SelectorExpr, kind SelectionKind, r
 	if m := check.Selections; m != nil {
 		if check.variational != nil {
 			builds, undoable := check.infoBuilds(x.Pos())
-			check.variational.info.selections.record(x, &Selection{kind, recv, obj, index, indirect}, builds, undoable)
+			check.variational.info.selections.record(x, &Selection{kind, recv, obj, index, indirect}, builds, check.variational.all, undoable)
 			return
 		}
 		m[x] = &Selection{kind, recv, obj, index, indirect}

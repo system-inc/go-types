@@ -99,57 +99,91 @@ func (answers keyAnswers[V]) at(build Mask) (V, bool) {
 	return none, false
 }
 
-// infoUndo is what one write replaced, so a unit that restarts can put it back.
+// infoUndo is what one write replaced, in the caller's map and among the staged answers, so a unit that restarts can
+// put it back.
 type infoUndo[K comparable, V any] struct {
-	key      K
-	had      bool
-	previous keyAnswers[V]
+	key            K
+	hadPlain       bool
+	previousPlain  V
+	hadStaged      bool
+	previousStaged keyAnswers[V]
 }
 
-// infoAnswers are one Info map's answers by build while the check runs, and what each write inside a unit replaced.
+// infoAnswers are one Info map's answers by build while the check runs, and what each write inside a unit replaced. An
+// answer that holds in every build goes straight into the caller's map, which is where the host's answers end up, and
+// costs a plain check's write; only a key answered differently by build is staged, and projected when the check ends.
 type infoAnswers[K comparable, V any] struct {
-	answers map[K]keyAnswers[V]
-	undo    []infoUndo[K, V]
+	plain  map[K]V
+	staged map[K]keyAnswers[V]
+	undo   []infoUndo[K, V]
 }
 
-// record writes key's answer value for builds, keeping what it replaced when undoable.
-func (log *infoAnswers[K, V]) record(key K, value V, builds Mask, undoable bool) {
-	if log.answers == nil {
-		log.answers = map[K]keyAnswers[V]{}
+// record writes key's answer value for builds, of all the check's builds, keeping what it replaced when undoable.
+func (log *infoAnswers[K, V]) record(key K, value V, builds Mask, all Mask, undoable bool) {
+	staged, isStaged := log.staged[key]
+	if builds == all && !isStaged {
+		if undoable {
+			previous, had := log.plain[key]
+			log.undo = append(log.undo, infoUndo[K, V]{key: key, hadPlain: had, previousPlain: previous})
+		}
+		log.plain[key] = value
+		return
 	}
-	previous, had := log.answers[key]
+	previousPlain, hadPlain := log.plain[key]
 	if undoable {
-		log.undo = append(log.undo, infoUndo[K, V]{key: key, had: had, previous: previous})
+		log.undo = append(log.undo, infoUndo[K, V]{key: key, hadPlain: hadPlain, previousPlain: previousPlain,
+			hadStaged: isStaged, previousStaged: staged})
 	}
-	log.answers[key] = previous.with(builds, value)
+	answers := staged
+	if hadPlain {
+		// The key held one answer in every build; it is staged now, with that answer for the builds this write leaves.
+		answers = keyAnswers[V]{first: maskedAnswer[V]{all, previousPlain}}
+		delete(log.plain, key)
+	}
+	answers = answers.with(builds, value)
+	if len(answers.more) == 0 && answers.first.builds == all {
+		log.plain[key] = answers.first.value
+		delete(log.staged, key)
+		return
+	}
+	if log.staged == nil {
+		log.staged = map[K]keyAnswers[V]{}
+	}
+	log.staged[key] = answers
 }
 
 // rollback puts back every write after mark.
 func (log *infoAnswers[K, V]) rollback(mark int) {
 	for index := len(log.undo) - 1; index >= mark; index-- {
 		undo := log.undo[index]
-		if undo.had {
-			log.answers[undo.key] = undo.previous
+		if undo.hadPlain {
+			log.plain[undo.key] = undo.previousPlain
 		} else {
-			delete(log.answers, undo.key)
+			delete(log.plain, undo.key)
+		}
+		if undo.hadStaged {
+			log.staged[undo.key] = undo.previousStaged
+		} else {
+			delete(log.staged, undo.key)
 		}
 	}
 	log.undo = log.undo[:mark]
 }
 
-// project gives plain the host's answers and each other build of all its overlay through overlayOf, comparing a
-// build's answer with the host's by same.
-// Each answer is first given as build has it by inBuild, when one is given.
-func (log *infoAnswers[K, V]) project(plain map[K]V, all Mask, overlayOf func(build int) *Overlay[K, V],
-	same func(V, V) bool, inBuild func(V, Mask) V,
+// project gives the caller's map the host's answer of each staged key and each other build of all its overlay through
+// overlayOf, comparing a build's answer with the host's by same. When inBuild is given, a build's answer is first
+// given as that build has it, the answers in the caller's map included: one answer held in every build can still read
+// otherwise in a build (a method selection's index).
+func (log *infoAnswers[K, V]) project(all Mask, overlayOf func(build int) *Overlay[K, V], same func(V, V) bool,
+	inBuild func(V, Mask) (V, bool),
 ) {
-	for key, answers := range log.answers {
+	for key, answers := range log.staged {
 		hostValue, hostHas := answers.at(1)
 		if hostHas && inBuild != nil {
-			hostValue = inBuild(hostValue, 1)
+			hostValue, _ = inBuild(hostValue, 1)
 		}
 		if hostHas {
-			plain[key] = hostValue
+			log.plain[key] = hostValue
 		}
 		for build := 1; build < 8; build++ {
 			if all&(1<<build) == 0 {
@@ -157,7 +191,7 @@ func (log *infoAnswers[K, V]) project(plain map[K]V, all Mask, overlayOf func(bu
 			}
 			value, has := answers.at(1 << build)
 			if has && inBuild != nil {
-				value = inBuild(value, 1<<build)
+				value, _ = inBuild(value, 1<<build)
 			}
 			switch {
 			case has && hostHas && same(value, hostValue):
@@ -165,6 +199,33 @@ func (log *infoAnswers[K, V]) project(plain map[K]V, all Mask, overlayOf func(bu
 				overlayOf(build).set(key, value)
 			case hostHas:
 				overlayOf(build).remove(key)
+			}
+		}
+	}
+	if inBuild == nil {
+		return
+	}
+	for key, value := range log.plain {
+		if _, isStaged := log.staged[key]; isStaged {
+			continue
+		}
+		hostValue, hostChanged := inBuild(value, 1)
+		if hostChanged {
+			log.plain[key] = hostValue
+		}
+		for build := 1; build < 8; build++ {
+			if all&(1<<build) == 0 {
+				continue
+			}
+			buildValue, changed := inBuild(value, 1<<build)
+			if !changed && !hostChanged {
+				continue
+			}
+			if !changed {
+				buildValue = value
+			}
+			if !same(buildValue, hostValue) {
+				overlayOf(build).set(key, buildValue)
 			}
 		}
 	}
@@ -220,9 +281,15 @@ func (check *Checker) infoBuilds(pos token.Pos) (Mask, bool) {
 	return state.all, false
 }
 
-// startInfo readies the check's Info answers: which builds each file compiles in.
+// startInfo readies the check's Info answers: each log writes into the caller's map of its kind, and which builds
+// each file compiles in.
 func (check *Checker) startInfo() {
 	state := check.variational
+	state.info.defs.plain = check.Defs
+	state.info.uses.plain = check.Uses
+	state.info.implicits.plain = check.Implicits
+	state.info.selections.plain = check.Selections
+	state.info.instances.plain = check.Instances
 	state.info.fileBuilds = make(map[*token.File]Mask, len(state.variation.Files))
 	for file, builds := range state.variation.Files {
 		if tokenFile := check.fset.File(file.Pos()); tokenFile != nil {
@@ -240,27 +307,27 @@ func (check *Checker) endInfo() {
 	logs := &state.info
 	sameObject := func(left Object, right Object) bool { return left == right }
 	if check.Defs != nil {
-		logs.defs.project(check.Defs, all, func(build int) *Overlay[*ast.Ident, Object] {
+		logs.defs.project(all, func(build int) *Overlay[*ast.Ident, Object] {
 			return &variation.Overlays[build].Defs
 		}, sameObject, nil)
 	}
 	if check.Uses != nil {
-		logs.uses.project(check.Uses, all, func(build int) *Overlay[*ast.Ident, Object] {
+		logs.uses.project(all, func(build int) *Overlay[*ast.Ident, Object] {
 			return &variation.Overlays[build].Uses
 		}, sameObject, nil)
 	}
 	if check.Implicits != nil {
-		logs.implicits.project(check.Implicits, all, func(build int) *Overlay[ast.Node, Object] {
+		logs.implicits.project(all, func(build int) *Overlay[ast.Node, Object] {
 			return &variation.Overlays[build].Implicits
 		}, sameObject, nil)
 	}
 	if check.Selections != nil {
-		logs.selections.project(check.Selections, all, func(build int) *Overlay[*ast.SelectorExpr, *Selection] {
+		logs.selections.project(all, func(build int) *Overlay[*ast.SelectorExpr, *Selection] {
 			return &variation.Overlays[build].Selections
-		}, sameSelection, selectionInBuild)
+		}, sameSelection, (&methodRemaps{}).selectionInBuild)
 	}
 	if check.Instances != nil {
-		logs.instances.project(check.Instances, all, func(build int) *Overlay[*ast.Ident, Instance] {
+		logs.instances.project(all, func(build int) *Overlay[*ast.Ident, Instance] {
 			return &variation.Overlays[build].Instances
 		}, sameInstance, nil)
 	}
@@ -274,34 +341,59 @@ func sameSelection(left *Selection, right *Selection) bool {
 		slices.Equal(left.index, right.index) && Identical(left.recv, right.recv)
 }
 
-// selectionInBuild is selection as build has it: a method's index among its named type's methods counted as build's
-// own methods are, since the merged named type holds every build's methods in one list. The index of a field, or of an
-// interface's method, is the build's already, read under the unit's builds.
-func selectionInBuild(selection *Selection, build Mask) *Selection {
+// methodRemaps remember, for each named type a projection meets, whether its methods can sit at another index in a
+// build than in its one list: only then is a selection of its methods counted again for each build.
+type methodRemaps struct {
+	byNamed map[*Named]bool
+}
+
+// differs reports whether named's methods can sit elsewhere in some build: a method is absent from some build, or the
+// merging importer gave its indices by build.
+func (remaps *methodRemaps) differs(named *Named) bool {
+	if remaps.byNamed == nil {
+		remaps.byNamed = map[*Named]bool{}
+	}
+	differs, known := remaps.byNamed[named]
+	if !known {
+		for _, method := range named.methods {
+			if variation := method.variation; variation != nil && (variation.presence != 0 || len(variation.methodIndices) > 0) {
+				differs = true
+				break
+			}
+		}
+		remaps.byNamed[named] = differs
+	}
+	return differs
+}
+
+// selectionInBuild is selection as build has it, and whether that differs from selection: a method's index among its
+// named type's methods counted as build's own methods are, since the merged named type holds every build's methods in
+// one list. The index of a field, or of an interface's method, is the build's already, read under the unit's builds.
+func (remaps *methodRemaps) selectionInBuild(selection *Selection, build Mask) (*Selection, bool) {
 	method, isMethod := selection.obj.(*Func)
 	if !isMethod || selection.kind == FieldVal || len(selection.index) == 0 {
-		return selection
+		return selection, false
 	}
 	receiver := method.Signature().Recv()
 	if receiver == nil {
-		return selection
+		return selection, false
 	}
 	receiverType := Unalias(receiver.Type())
 	if pointer, isPointer := receiverType.(*Pointer); isPointer {
 		receiverType = Unalias(pointer.Elem())
 	}
 	named, isNamed := receiverType.(*Named)
-	if !isNamed {
-		return selection
+	if !isNamed || !remaps.differs(named.Origin()) {
+		return selection, false
 	}
 	index, found := methodIndexIn(method.Origin(), named, build)
 	last := len(selection.index) - 1
 	if !found || selection.index[last] == index {
-		return selection
+		return selection, false
 	}
 	inBuild := *selection
 	inBuild.index = append(slices.Clone(selection.index[:last]), index)
-	return &inBuild
+	return &inBuild, true
 }
 
 // sameInstance reports whether two instances answer alike: identical type arguments and an identical type.
