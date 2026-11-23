@@ -971,6 +971,11 @@ func (check *Checker) mergeVariant(ident *ast.Ident, obj Object, d *declInfo) in
 		firstVariation.presence = firstDecl.mask
 	}
 	held := firstVariation.presence
+	// A presence of zero is every build: the name's declarations merged so far cover them all, and another
+	// declaration of it in any build redeclares it.
+	if held == 0 {
+		held = check.variational.all
+	}
 	for _, alternate := range check.pkg.scope.alternates[obj.Name()] {
 		held |= variationOf(alternate).presence
 	}
@@ -1095,6 +1100,25 @@ func (check *Checker) lastOrder() uint32 {
 		last = max(last, obj.order())
 	}
 	return last
+}
+
+// lookupInBuild is the package-level object of name in build, when build isn't zero: the name's first object when
+// build declares it, or else the object of another kind kept beside it for build, or nil. Outside every unit, as
+// collectObjects resolves methods' receivers, Lookup answers the name's first object for every build.
+func (check *Checker) lookupInBuild(name string, build Mask) Object {
+	first := check.pkg.scope.Lookup(name)
+	if build == 0 || first == nil {
+		return first
+	}
+	if variation := variationOf(first); variation == nil || variation.presence == 0 || variation.presence&build != 0 {
+		return first
+	}
+	for _, alternate := range check.pkg.scope.alternates[name] {
+		if variationOf(alternate).presence&build != 0 {
+			return alternate
+		}
+	}
+	return nil
 }
 
 // typeSpecIn is the declaration of tname that build compiles, when build isn't zero and tname is declared again in

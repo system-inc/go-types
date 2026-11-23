@@ -595,8 +595,8 @@ func (check *Checker) unpackRecv(rtyp ast.Expr, unpackParams bool) (ptr bool, ba
 // through generic alias types are not permitted. If no such type name exists, the
 // returned base is nil.
 //
-// cohere's variational spike: build, when not zero, is the one build to resolve name in, following the alias
-// declaration that build compiles.
+// cohere's variational spike: build, when not zero, is the one build to resolve name in, following the object of
+// the name and the alias declaration that build compiles.
 func (check *Checker) resolveBaseTypeName(ptr bool, name *ast.Ident, build Mask) (ptr_ bool, base *TypeName) {
 	// Algorithm: Starting from name, which is expected to denote a type,
 	// we follow that type through non-generic alias declarations until
@@ -605,7 +605,8 @@ func (check *Checker) resolveBaseTypeName(ptr bool, name *ast.Ident, build Mask)
 	for name != nil {
 		// name must denote an object found in the current package scope
 		// (note that dot-imported objects are not in the package scope!)
-		obj := check.pkg.scope.Lookup(name.Name)
+		// cohere's variational spike: in build's own object of the name, which may be of another kind than the first.
+		obj := check.lookupInBuild(name.Name, build)
 		if obj == nil {
 			break
 		}

@@ -163,3 +163,61 @@ func TestVariationalProjectsAGenericTypeDeclaredByBuild(t *testing.T) {
 	t.Parallel()
 	projectAndCompare(t, genericDefinitionFiles)
 }
+
+// kindFiles declare names of a different kind in each build: Value is a constant on darwin and linux and a defined
+// type with a method on windows, Measure a defined type with a method on windows and a function elsewhere, declared
+// in the other order, and Choice a constant on darwin and linux and a variable on windows, read by a shared
+// declaration. Each build's method is found on its own build's type.
+var kindFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+var ChoiceValue = Choice + 1
+`},
+	{"kind_unix.go", buildDarwin | buildLinux, `package fork
+
+const Value = 1
+
+func Convert() int { return int(Value) }
+
+func Measure() int { return 3 }
+
+const Choice = 1
+`},
+	{"kind_windows.go", buildWindows, `package fork
+
+type Value int
+
+func (Value) Measure() int { return 2 }
+
+func Measured(value Value) int { return value.Measure() }
+
+type Measure struct{}
+
+func (*Measure) Size() int { return 4 }
+
+func Sized(measure *Measure) int { return measure.Size() }
+
+var Choice = 2
+`},
+}
+
+// TestVariationalProjectsANameOfADifferentKindByBuild is the projection test over kindFiles.
+func TestVariationalProjectsANameOfADifferentKindByBuild(t *testing.T) {
+	t.Parallel()
+	projectAndCompare(t, kindFiles)
+}
+
+// TestVariationalReportsANameRedeclaredInABuildItsMergedDeclarationsCover declares Value in each build's own file,
+// which together cover every build, and again on linux as a variable: linux's plain check reports it redeclared, and
+// so must the variational check.
+func TestVariationalReportsANameRedeclaredInABuildItsMergedDeclarationsCover(t *testing.T) {
+	t.Parallel()
+	_, published := projectAndCompareWithDiagnostics(t, []fixtureFile{
+		{"value_unix.go", buildDarwin | buildLinux, "package fork\n\nconst Value = 1\n"},
+		{"value_windows.go", buildWindows, "package fork\n\nconst Value = 2\n"},
+		{"value_linux.go", buildLinux, "package fork\n\nvar Value = 3\n"},
+	}, true)
+	if len(published) == 0 {
+		t.Error("the variational check reported nothing, and linux's plain check reports Value redeclared")
+	}
+}
