@@ -1054,9 +1054,21 @@ func splitAt(state *variationalState, parts []Mask) {
 // an imported object the first time a unit reads it, and would be left half done by a split's panic. A unit that reads
 // the object afterwards answers for its own builds as always. It writes only the state of the check running on its
 // own goroutine, and nothing when none is in a unit, so goroutines that resolve imported objects share no write.
+//
+// On a goroutine running no check, or reading as one build (InBuild), work reads as a check outside every unit does,
+// not as one build's view (hostRead's or InBuild's): every build's objects are found and no name is left out, so the
+// importer's own reads of each build's universe and of the merged one resolve no lazy entry only to learn whether
+// one build has it. That goroutine's state for work is its own.
 func Outside(work func()) {
 	state := runningState()
-	if state == nil || state.depth == 0 {
+	if state == nil || state.inBuild {
+		outside := &variationalState{all: 1, mask: 1}
+		outside.register()
+		defer outside.unregister()
+		work()
+		return
+	}
+	if state.depth == 0 {
 		work()
 		return
 	}

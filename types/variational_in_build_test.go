@@ -125,6 +125,44 @@ func TestVariationalInBuildAnswersTheBuildNotTheHost(test *testing.T) {
 	}
 }
 
+// TestVariationalOutsideReadsEveryBuild checks a package whose OnlyWindows darwin, the host, doesn't declare, then reads
+// it with no state, as the host, and inside Outside, as the merging importer reads its own universe: there every
+// build's objects are found and no name is left out, so no lazy entry is resolved only to learn whether the host has
+// it. A scope of another universe holds a lazy entry that counts its resolutions.
+func TestVariationalOutsideReadsEveryBuild(test *testing.T) {
+	test.Parallel()
+	fileSet := token.NewFileSet()
+	parsed := parseFixture(test, fileSet, []fixtureFile{
+		{"shared.go", everyBuild, "package fork\n\nvar Shared = 1\n"},
+		{"only_windows.go", buildWindows, "package fork\n\nvar OnlyWindows = 2\n"},
+	})
+	checked, checkError := (&types.Config{Variation: &types.Variation{Builds: everyBuild, Files: parsed.masks},
+		Importer: fixtureImporter{}}).Check("fork", fileSet, parsed.files, &types.Info{})
+	if checkError != nil {
+		test.Fatal(checkError)
+	}
+	if found := checked.Scope().Lookup("OnlyWindows"); found != nil {
+		test.Errorf("OnlyWindows read with no state is %v, and the host doesn't declare it", found)
+	}
+	resolutions := 0
+	other := types.NewScope(nil, token.NoPos, token.NoPos, "another universe's package")
+	other.InsertLazy("Lazy", func() types.Object {
+		resolutions++
+		return types.NewVar(token.NoPos, nil, "Lazy", types.Typ[types.Int])
+	})
+	types.Outside(func() {
+		if found := checked.Scope().Lookup("OnlyWindows"); found == nil {
+			test.Error("OnlyWindows read inside Outside is absent, and windows declares it")
+		}
+		if names := checked.Scope().Names(); !slices.Contains(names, "OnlyWindows") {
+			test.Errorf("Names inside Outside are %v, without windows's OnlyWindows", names)
+		}
+		if names := other.Names(); !slices.Equal(names, []string{"Lazy"}) || resolutions != 0 {
+			test.Errorf("Names inside Outside are %v, and resolved the lazy entry %d times", names, resolutions)
+		}
+	})
+}
+
 // spellMember spells a package-level object by its kind and type, a constant's value, and a type name's underlying
 // type and the method sets of its named type and a pointer to it, each method by name, type, index and indirection.
 func spellMember(object types.Object) string {
