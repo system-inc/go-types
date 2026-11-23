@@ -30,6 +30,8 @@ it is a commit of one concern.
   keeps one identity across builds and only its properties vary by build. A unit of work runs under the builds it
   holds in, and runs again for each group of builds whose reads differ.
 - `gcimporter` reads each object of a package's export data the first time it is looked up.
+- `canonical` is ours: it spells the fork's types as cohere's platform census spells go/types', so a check projected
+  to one build compares exactly with that build's plain answers.
 
 ## Taking in a Go release
 
