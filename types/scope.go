@@ -102,7 +102,10 @@ func (s *Scope) lookupIgnoringCase(name string, exported bool) []Object {
 	var matches []Object
 	for _, n := range s.Names() {
 		if (!exported || isExported(n)) && strings.EqualFold(n, name) {
-			matches = append(matches, s.Lookup(n))
+			// cohere's variational spike: a name absent from the current unit's builds looks up nil, and is no match.
+			if obj := s.Lookup(n); obj != nil {
+				matches = append(matches, obj)
+			}
 		}
 	}
 	return matches
