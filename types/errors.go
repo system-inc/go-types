@@ -114,7 +114,8 @@ func (err *error_) report() {
 	// exclude them if these strings are not at the beginning,
 	// and only if we have at least one error already reported.
 	check := err.check
-	if check.firstErr != nil {
+	// cohere's variational spike: an error held for its unit's end was reported first, as a plain check's would be.
+	if check.firstErr != nil || len(check.pendingErrors) > 0 {
 		// It is sufficient to look at the first sub-error only.
 		msg := err.desc[0].msg
 		if strings.Index(msg, "invalid operand") > 0 || strings.Index(msg, "invalid type") > 0 {
@@ -210,6 +211,17 @@ func (check *Checker) handleError(index int, posn positioner, code Code, msg str
 		e.go116end = span.end
 	}
 
+	// cohere's variational spike: an error inside a unit is held until the unit's run is known to survive.
+	if check.variational != nil && check.variational.depth > 0 {
+		check.pendingErrors = append(check.pendingErrors, pendingError{err: e})
+		return
+	}
+	check.publishError(e)
+}
+
+// publishError makes e the check's first error if it is, and hands it to the error handler (cohere's variational
+// spike: split from handleError, so a held error is published as any other).
+func (check *Checker) publishError(e Error) {
 	if check.firstErr == nil {
 		check.firstErr = e
 	}

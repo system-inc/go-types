@@ -168,6 +168,9 @@ type Checker struct {
 	vundo       []vundo           // what each answer write replaced while a unit that could restart runs
 	untypedLog  []ast.Expr // untyped expressions in the order remembered, so a unit can flush or drop its own
 	recordOrder int64      // the iota of the constant being declared, or -1 (see vrecord.order)
+	// the diagnostics reported inside units, held until the outermost unit ends, so a run abandoned for a split
+	// publishes none of its own
+	pendingErrors []pendingError
 
 	// environment within which the current object is type-checked (valid only
 	// for the duration of type-checking a specific object)

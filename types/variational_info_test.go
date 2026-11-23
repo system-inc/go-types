@@ -19,14 +19,15 @@ import (
 // file only some builds compile compares only as being in such a file, since a name declared in each build's own file
 // is one object for all of them, at its first declaration, and declarations alike across builds fold into one, as the
 // model has it (variational.go). Selections compare by kind, index, indirection and object, and instances by their
-// type arguments and type.
+// type arguments and type. The variational check's diagnostics, told apart, are every build's plain diagnostics.
 func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 	test.Parallel()
 	for name, fixtures := range map[string][]fixtureFile{
-		"spike": fixtureFiles,
-		"hard":  hardFiles,
-		"usage": usageFiles,
-		"methods": methodOrderFiles,
+		"spike":            fixtureFiles,
+		"hard":             hardFiles,
+		"usage":            usageFiles,
+		"methods":          methodOrderFiles,
+		"abandoned errors": abandonedErrorFiles,
 	} {
 		test.Run(name, func(test *testing.T) {
 			test.Parallel()
@@ -34,8 +35,13 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			parsed := parseFixture(test, fileSet, fixtures)
 			variation := &types.Variation{Builds: everyBuild, Files: parsed.masks}
 			info := fullInfo()
-			if _, checkError := (&types.Config{Variation: variation, Importer: unsafeImporter{}}).Check("fork",
-				fileSet, parsed.files, info); checkError != nil {
+			// A fixture may report errors, as the abandoned errors fixture does: they're compared with the plain
+			// checks' rather than refused.
+			var published []string
+			plainDiagnostics := map[string]bool{}
+			if _, checkError := (&types.Config{Variation: variation, Importer: unsafeImporter{},
+				Error: func(diagnostic error) { published = append(published, diagnostic.Error()) }}).Check("fork",
+				fileSet, parsed.files, info); checkError != nil && len(published) == 0 {
 				test.Fatalf("variational check: %v", checkError)
 			}
 			overlaid := 0
@@ -46,8 +52,9 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 			for index, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
 				spelling.build = build
 				plain := fullInfo()
-				if _, checkError := (&types.Config{Importer: unsafeImporter{}}).Check("fork", fileSet,
-					parsed.filesIn(build), plain); checkError != nil {
+				if _, checkError := (&types.Config{Importer: unsafeImporter{},
+					Error: func(diagnostic error) { plainDiagnostics[diagnostic.Error()] = true }}).Check("fork", fileSet,
+					parsed.filesIn(build), plain); checkError != nil && !plainDiagnostics[checkError.Error()] {
 					test.Fatalf("plain check of build %03b: %v", build, checkError)
 				}
 				if len(plain.Defs) == 0 || len(plain.Uses) == 0 {
@@ -73,6 +80,7 @@ func TestVariationalInfoProjectsToEachBuild(test *testing.T) {
 					spellInstances(fileSet, project(info.Instances, overlays.Instances)),
 					spellInstances(fileSet, plain.Instances))
 			}
+			compareDiagnostics(test, published, plainDiagnostics)
 			// Every fixture's builds declare things in files of their own, so some answers differ from the host's.
 			if overlaid == 0 {
 				test.Error("no build's overlay holds anything")

@@ -126,8 +126,19 @@ func TestVariationalCheckProjectsToEachBuild(t *testing.T) {
 }
 
 // projectAndCompare checks fixtures once for every build, compares the projection to each build's plain check, and
-// returns the functions with an expression answered differently by build.
+// returns the functions with an expression answered differently by build. Every check must be clean.
 func projectAndCompare(t *testing.T, fixtures []fixtureFile) map[string]bool {
+	t.Helper()
+	forked, _ := projectAndCompareWithDiagnostics(t, fixtures, false)
+	return forked
+}
+
+// projectAndCompareWithDiagnostics is projectAndCompare, and when diagnosing it lets the checks report errors: the
+// variational check's diagnostics, each spelled as Error spells it, must be every build's plain diagnostics together,
+// and are returned in the order it published them.
+func projectAndCompareWithDiagnostics(t *testing.T, fixtures []fixtureFile, diagnosing bool) (map[string]bool,
+	[]string,
+) {
 	t.Helper()
 	fileSet := token.NewFileSet()
 	var files []*ast.File
@@ -142,9 +153,14 @@ func projectAndCompare(t *testing.T, fixtures []fixtureFile) map[string]bool {
 	}
 	variation := &types.Variation{Builds: everyBuild, Files: masks}
 	configuration := &types.Config{Variation: variation, Importer: unsafeImporter{}}
-	if _, checkError := configuration.Check("fork", fileSet, files, &types.Info{}); checkError != nil {
+	var published []string
+	if diagnosing {
+		configuration.Error = func(diagnostic error) { published = append(published, diagnostic.Error()) }
+	}
+	if _, checkError := configuration.Check("fork", fileSet, files, &types.Info{}); checkError != nil && !diagnosing {
 		t.Fatalf("variational check: %v", checkError)
 	}
+	plainDiagnostics := map[string]bool{}
 	if len(variation.Types) == 0 {
 		t.Fatal("the variational check recorded no answers")
 	}
@@ -174,7 +190,10 @@ func projectAndCompare(t *testing.T, fixtures []fixtureFile) map[string]bool {
 		}
 		plain := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
 		plainConfiguration := &types.Config{Importer: unsafeImporter{}}
-		if _, checkError := plainConfiguration.Check("fork", fileSet, built, plain); checkError != nil {
+		if diagnosing {
+			plainConfiguration.Error = func(diagnostic error) { plainDiagnostics[diagnostic.Error()] = true }
+		}
+		if _, checkError := plainConfiguration.Check("fork", fileSet, built, plain); checkError != nil && !diagnosing {
 			t.Fatalf("plain check of build %03b: %v", build, checkError)
 		}
 		// Keyed by position and text, never by node: a checker makes some nodes afresh each time it checks
@@ -219,6 +238,7 @@ func projectAndCompare(t *testing.T, fixtures []fixtureFile) map[string]bool {
 			}
 		}
 	}
+	compareDiagnostics(t, published, plainDiagnostics)
 	var forkedNames []string
 	for name := range forked {
 		forkedNames = append(forkedNames, name)
@@ -226,7 +246,26 @@ func projectAndCompare(t *testing.T, fixtures []fixtureFile) map[string]bool {
 	sort.Strings(forkedNames)
 	t.Logf("functions that forked: %s; units %d, restarts %d", strings.Join(forkedNames, ", "), variation.Units,
 		variation.Restarts)
-	return forked
+	return forked, published
+}
+
+// compareDiagnostics requires the diagnostics a variational check published to be, once each told apart, the plain
+// checks' diagnostics together. A diagnostic reported in more than one build may be published once for each run that
+// reports it, so their counts aren't compared here.
+func compareDiagnostics(t *testing.T, published []string, plain map[string]bool) {
+	t.Helper()
+	publishedOnce := map[string]bool{}
+	for _, diagnostic := range published {
+		publishedOnce[diagnostic] = true
+		if !plain[diagnostic] {
+			t.Errorf("the variational check reported %q, and no build's plain check does", diagnostic)
+		}
+	}
+	for diagnostic := range plain {
+		if !publishedOnce[diagnostic] {
+			t.Errorf("a plain check reported %q, and the variational check doesn't", diagnostic)
+		}
+	}
 }
 
 // positionKey names expression by where it is and what it says.

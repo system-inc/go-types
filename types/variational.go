@@ -693,6 +693,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 	savedPositions := len(check.posStack)
 	savedPath := len(check.objPath)
 	savedEnvironment := check.environment
+	savedErrors := len(check.pendingErrors)
 	check.variational.mask = builds
 	check.variational.depth++
 	defer func() {
@@ -700,6 +701,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 		check.variational.mask = savedMask
 		recovered := recover()
 		if recovered == nil {
+			check.settleErrors(savedErrors, declaration)
 			return
 		}
 		request, isSplit := recovered.(splitRequest)
@@ -731,6 +733,7 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 			check.pop()
 		}
 		check.environment = savedEnvironment
+		check.dropAbandonedErrors(savedErrors)
 		check.variational.variation.Restarts++
 		split = request.parts
 	}()
@@ -748,6 +751,44 @@ func (check *Checker) tryUnit(builds Mask, run func(), declaration bool) (split 
 	}
 	check.variational.variation.Units++
 	return nil
+}
+
+// pendingError is an error reported inside a unit and not yet published. It is persistent once a finished
+// declaration reported it, since a declaration is never checked again, so a unit around it that restarts keeps it.
+type pendingError struct {
+	err        Error
+	persistent bool
+}
+
+// settleErrors settles the errors a run that finished reported after the first from of them: a declaration's are
+// kept whatever happens around it, and once no unit is running every held error is published, in the order reported.
+func (check *Checker) settleErrors(from int, declaration bool) {
+	if declaration {
+		for index := from; index < len(check.pendingErrors); index++ {
+			check.pendingErrors[index].persistent = true
+		}
+	}
+	if check.variational.depth > 0 {
+		return
+	}
+	pending := check.pendingErrors
+	check.pendingErrors = nil
+	for _, held := range pending {
+		check.publishError(held.err)
+	}
+}
+
+// dropAbandonedErrors drops the errors a run abandoned for a split reported after the first from of them, all but
+// those of a declaration that finished inside it.
+func (check *Checker) dropAbandonedErrors(from int) {
+	kept := check.pendingErrors[:from]
+	for _, held := range check.pendingErrors[from:] {
+		if held.persistent {
+			kept = append(kept, held)
+		}
+	}
+	clear(check.pendingErrors[len(kept):])
+	check.pendingErrors = kept
 }
 
 // flushUntyped records, under the current unit's builds, the untyped expressions the unit remembered and never
@@ -808,6 +849,7 @@ func (check *Checker) startVariational() bool {
 // endVariational ends the check. Its answers are already in the variation, written as they came.
 func (check *Checker) endVariational() {
 	check.vundo = nil
+	check.pendingErrors = nil
 	check.endInfo()
 	goroutine := goroutineIdentity()
 	if outer := check.variational.outer; outer != nil {
