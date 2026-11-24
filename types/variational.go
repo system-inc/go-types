@@ -982,6 +982,16 @@ type maskedPos struct {
 	pos    token.Pos
 }
 
+// SetPosition says obj is declared at pos in builds, elsewhere than at its own position: for the merging importer,
+// whose merged struct or interface holds one field or method for every build that declares it alike, each build in
+// a file of its own, and whose merged package-level object is declared in each build's. Read as one of builds, obj's
+// Pos is pos. A build given no position reads obj's own.
+func SetPosition(obj Object, builds Mask, pos token.Pos) {
+	base := obj.(interface{ base() *object }).base()
+	variation := base.ensureVariation()
+	variation.positions = append(variation.positions, maskedPos{builds, pos})
+}
+
 // positionHere is where obj, with variation, is declared as a read as one build has it (InBuild, or the host's with no
 // check): the declaration of that build when another build's declaration comes first, and pos, its first, otherwise
 // and in a check.
@@ -2220,6 +2230,11 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 			named.fromRHS = collapsed[0].typ
 			named.tparams = collapsed[0].tparams
 		}
+		// Declared alike by every run, the type holds the answer the runs were folded into, whose fields and methods
+		// stand for every run's, each at its own run's place (typeFolds), and not the last run's.
+		if named != nil && len(collapsed) == 1 {
+			named.keepFolded(collapsed[0])
+		}
 		if named != nil {
 			base.typ = named
 		}
@@ -2322,6 +2337,18 @@ func (check *Checker) settleSibling(sibling *Var) {
 	if len(collapsed) > 1 {
 		sibling.variation.variants = collapsed
 	}
+}
+
+// keepFolded makes n, whose every declaration gave an answer alike, hold kept, the one they were folded into: its
+// right-hand side, and no underlying type or size resolved from the last run's.
+func (n *Named) keepFolded(kept objectVariant) {
+	if n.fromRHS == kept.typ {
+		return
+	}
+	n.fromRHS = kept.typ
+	n.tparams = kept.tparams
+	n.underlying = nil
+	atomic.AndUint32(&n.state_, ^uint32(hasUnder|hasVarSize))
 }
 
 // resetForVariant readies n to be declared again, for another build's declaration or another group of builds after a

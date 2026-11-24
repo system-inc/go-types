@@ -508,7 +508,8 @@ func sameDeclaredObjects(left Type, right Type) bool {
 // typeFolds map what an answer folded into an alike answer of another run declares (its fields, an interface's
 // methods) to what the kept answer declares in its place. Identical types have one shape, so the two are walked side
 // by side. A function type's parameters stay each run's own: nothing but their own declaration and their function
-// type's scope names them, and identical signatures may name them otherwise.
+// type's scope names them, and identical signatures may name them otherwise. A field or an interface's method of
+// function type therefore keeps each run's signature beside the kept one's, for a read as one build.
 type typeFolds struct {
 	objects map[Object]Object
 	// types are the kept answer's type for each type of a folded answer that declares objects or holds one that does
@@ -559,7 +560,7 @@ func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 			typed(kept)
 			for index, field := range folded.fields {
 				object(field, kept.fields[index])
-				folds.add(field.typ, kept.fields[index].typ, builds)
+				folds.member(&field.object, &kept.fields[index].object, builds)
 			}
 		}
 	case *Pointer:
@@ -599,7 +600,7 @@ func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 			for index, method := range folded.methods {
 				if method.name == kept.methods[index].name {
 					object(method, kept.methods[index])
-					folds.add(method.typ, kept.methods[index].typ, builds)
+					folds.member(&method.object, &kept.methods[index].object, builds)
 				}
 			}
 			if len(kept.embeddeds) == len(folded.embeddeds) {
@@ -608,6 +609,23 @@ func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 				}
 			}
 		}
+	}
+}
+
+// member folds what folded, a field or an interface's method of an answer in builds, declares in its type into
+// kept's, the one that stands for it. A function type's parameters and results stay each run's own, so a member of
+// function type is left its own instead: kept answers a read as one of builds with folded's signature
+// (objectVariation.declared), as a function declared again by build does.
+func (folds *typeFolds) member(folded *object, kept *object, builds Mask) {
+	_, foldedSignature := folded.typ.(*Signature)
+	_, keptSignature := kept.typ.(*Signature)
+	if !foldedSignature || !keptSignature {
+		folds.add(folded.typ, kept.typ, builds)
+		return
+	}
+	if folded != kept && folded.typ != kept.typ {
+		variation := kept.ensureVariation()
+		variation.declared = append(variation.declared, objectVariant{mask: builds, typ: folded.typ})
 	}
 }
 
