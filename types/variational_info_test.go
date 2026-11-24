@@ -34,6 +34,8 @@ var projectionFixtures = map[string][]fixtureFile{
 	"closures":           closureFiles,
 	"literal parameters": literalParameterFiles,
 	"imported goos":      importedGOOSFiles,
+	"accessors":          accessorFiles,
+	"declared again":     declaredFiles,
 }
 
 // TestVariationalInfoProjectsToEachBuild checks each fixture once for every build with every Info map, then requires

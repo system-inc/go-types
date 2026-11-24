@@ -925,7 +925,7 @@ func requireAgreement(test *testing.T, label string, fileSet *token.FileSet, che
 func TestVariationalAgreeingBuildsReadAlike(test *testing.T) {
 	test.Parallel()
 	tally := &agreementTally{}
-	fixtures := map[string][]fixtureFile{"agreeing": agreeingFiles, "accessors": accessorFiles}
+	fixtures := map[string][]fixtureFile{"agreeing": agreeingFiles}
 	for name, files := range projectionFixtures {
 		fixtures[name] = files
 	}

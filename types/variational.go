@@ -807,6 +807,12 @@ type objectVariation struct {
 	// another build's file merged into it, or an alike one folded into it (Pos).
 	positions []maskedPos
 	variants []objectVariant // its answers by build once declared; nil while one answer holds everywhere
+	// declared are a function's answers as each of its declarations gave them, kept when folding the answers alike
+	// into one (appendVariant) left some build another declaration's signature: identical signatures are one answer
+	// for a check's units, which then never split on them, and each still holds its own receiver, parameters and
+	// results, by their own names at their own places, which a read as one build answers with (pickObjectVariant).
+	// It is nil when every build's answer is its own declaration's already.
+	declared []objectVariant
 	decls    []declVariant   // a source object declared in more than one file: each declaration and its builds
 	named    *Named          // a type name's one named type, kept across its declarations
 	// methodIndices are a method's index among its named type's methods in each build, as each build's own declaration
@@ -921,6 +927,35 @@ func SetVariants(obj Object, variants []Variant) {
 	if len(collapsed) > 1 {
 		base.ensureVariation().variants = collapsed
 	}
+	// A function's signatures alike in type are each build's own all the same, for a read as one build.
+	if _, isFunc := obj.(*Func); isFunc {
+		given := make([]objectVariant, len(variants))
+		for index, variant := range variants {
+			given[index] = objectVariant{mask: variant.Builds, typ: variant.Type, val: variant.Value}
+		}
+		if declared := declaredAnswers(given, collapsed); declared != nil {
+			base.ensureVariation().declared = declared
+		}
+	}
+}
+
+// declaredAnswers are answers, a function's as each of its declarations gave them, with those that are one type
+// object kept as one, when they aren't what folding them left, collapsed: some build's declaration was folded into
+// another's, alike in type. They are nil when each build's answer in collapsed is its own declaration's.
+func declaredAnswers(answers []objectVariant, collapsed []objectVariant) []objectVariant {
+	var declared []objectVariant
+	for _, answer := range answers {
+		index := slices.IndexFunc(declared, func(kept objectVariant) bool { return kept.typ == answer.typ })
+		if index < 0 {
+			declared = append(declared, answer)
+			continue
+		}
+		declared[index].mask |= answer.mask
+	}
+	if len(declared) == len(collapsed) {
+		return nil
+	}
+	return declared
 }
 
 // maskedPos is a position and the builds it holds in.
@@ -1317,12 +1352,31 @@ func readingState() *variationalState {
 // pickObjectVariant is the answer of obj's variation for the current unit's builds, splitting the unit when they
 // differ.
 func pickObjectVariant(variation *objectVariation) (objectVariant, bool) {
-	if variation == nil || len(variation.variants) == 0 {
+	if variation == nil || len(variation.variants) == 0 && variation.declared == nil {
 		return objectVariant{}, false
 	}
 	state := readingState()
 	if state == nil {
 		return objectVariant{}, false
+	}
+	// A function declared again by build with one type has no answers by build for a unit, which reads its one type
+	// and never splits on it, and read as one build it is that build's own declaration's.
+	if variation.declared != nil {
+		if state.inBuild {
+			if declared, picked := pickDeclared(variation, state); picked {
+				return declared, true
+			}
+		}
+		if len(variation.variants) == 0 {
+			// Its one type answers a unit, and a build that declares it nowhere: an agreement being gathered
+			// (Agreeing) keeps the builds no declaration holds in, which read the same.
+			if state.agreeing != nil {
+				for _, declared := range variation.declared {
+					*state.agreeing &^= declared.mask
+				}
+			}
+			return objectVariant{}, false
+		}
 	}
 	state.narrowed.Add(1)
 	mask := state.mask
@@ -1355,6 +1409,24 @@ func pickObjectVariant(variation *objectVariation) (objectVariant, bool) {
 		*state.agreeing &= variation.variants[first].mask
 	}
 	return variation.variants[first], true
+}
+
+// pickDeclared is the answer of a function's own declaration in the build state reads as, a single build, and
+// whether a declaration holds in it: when none does, the function's answers by build answer as for any object. An
+// agreement being gathered (Agreeing) keeps the builds of that one declaration, whose signature holds its own
+// objects, however alike another's is in type.
+func pickDeclared(variation *objectVariation, state *variationalState) (objectVariant, bool) {
+	for _, declared := range variation.declared {
+		if declared.mask&state.mask == 0 {
+			continue
+		}
+		state.narrowed.Add(1)
+		if state.agreeing != nil {
+			*state.agreeing &= declared.mask
+		}
+		return declared, true
+	}
+	return objectVariant{}, false
 }
 
 // answeringParts are the groups of mask's builds each of variants answers for, the parts of a split: built only when
@@ -1521,11 +1593,21 @@ func (t *Named) expandMethodVariants(orig *Func, expanded *Func) {
 	}
 	variation := *orig.variation
 	variation.variants = make([]objectVariant, len(orig.variation.variants))
+	// Each declaration's own signature is instantiated as well, for a read as one build.
+	if orig.variation.declared != nil {
+		variation.declared = make([]objectVariant, len(orig.variation.declared))
+	}
 	Outside(func() {
 		for index, variant := range orig.variation.variants {
 			variation.variants[index] = variant
 			if signature, isSignature := variant.typ.(*Signature); isSignature {
 				variation.variants[index].typ = t.instantiateMethodSignature(orig, signature)
+			}
+		}
+		for index, declared := range orig.variation.declared {
+			variation.declared[index] = declared
+			if signature, isSignature := declared.typ.(*Signature); isSignature {
+				variation.declared[index].typ = t.instantiateMethodSignature(orig, signature)
 			}
 		}
 	})
@@ -2125,6 +2207,13 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 	if len(collapsed) > 1 {
 		variation = base.ensureVariation()
 		variation.variants = collapsed
+	}
+	// A function's signatures alike in type are each run's own all the same, for a read as one build: its parameters
+	// are the objects its body names in that run's builds, which no fold replaces.
+	if _, isFunc := obj.(*Func); isFunc {
+		if declared := declaredAnswers(answers, collapsed); declared != nil {
+			base.ensureVariation().declared = declared
+		}
 	}
 }
 
