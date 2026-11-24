@@ -11,6 +11,7 @@ package types
 import (
 	"go/ast"
 	"go/token"
+	"math/bits"
 	"slices"
 )
 
@@ -404,7 +405,7 @@ func (check *Checker) endInfo() {
 	if check.Types != nil {
 		logs.types.project(all, func(build int) *Overlay[ast.Expr, TypeAndValue] {
 			return &variation.Overlays[build].Types
-		}, sameTypeAndValue, nil)
+		}, sameTypeAndValue, logs.declaredSignatures(all))
 	}
 	if check.Defs != nil {
 		logs.defs.project(all, func(build int) *Overlay[*ast.Ident, Object] {
@@ -457,7 +458,8 @@ func sameTypeAndValue(left TypeAndValue, right TypeAndValue) bool {
 }
 
 // sameDeclaredObjects reports whether two identical types declare the same objects: a signature's parameters and
-// results, a struct's fields, an interface's explicit methods, through pointers, slices, arrays, maps and channels.
+// results, a tuple's variables, a struct's fields, an interface's explicit methods, through pointers, slices, arrays,
+// maps and channels.
 // Each run of a unit declares its own (a func literal's parameters), so identical types from two runs are two
 // answers: a build answered with another run's signature reads parameters its own Defs never declare.
 func sameDeclaredObjects(left Type, right Type) bool {
@@ -485,6 +487,9 @@ func sameDeclaredObjects(left Type, right Type) bool {
 	case *Interface:
 		right := right.(*Interface)
 		return slices.Equal(left.methods, right.methods)
+	case *Tuple:
+		// The type of a call with more than one result is its function's results themselves.
+		return sameTuple(left, right.(*Tuple))
 	case *Pointer:
 		return sameDeclaredObjects(left.base, right.(*Pointer).base)
 	case *Slice:
@@ -506,6 +511,11 @@ func sameDeclaredObjects(left Type, right Type) bool {
 // type's scope names them, and identical signatures may name them otherwise.
 type typeFolds struct {
 	objects map[Object]Object
+	// types are the kept answer's type for each type of a folded answer that declares objects or holds one that does
+	// (a struct, an interface, and a pointer, slice, array, channel or map of one): an expression of the folded
+	// answer's declaration whose type it is has the kept answer's, whose objects stand for its own. A function type
+	// is never among them, since its parameters stay its own.
+	types map[Type]Type
 }
 
 // add maps what folded, an answer in builds, declares to what kept declares in its place.
@@ -537,9 +547,16 @@ func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 			folds.add(folded.At(index).typ, kept.At(index).typ, builds)
 		}
 	}
+	typed := func(kept Type) {
+		if folds.types == nil {
+			folds.types = map[Type]Type{}
+		}
+		folds.types[folded] = kept
+	}
 	switch folded := folded.(type) {
 	case *Struct:
 		if kept, isStruct := kept.(*Struct); isStruct && len(kept.fields) == len(folded.fields) {
+			typed(kept)
 			for index, field := range folded.fields {
 				object(field, kept.fields[index])
 				folds.add(field.typ, kept.fields[index].typ, builds)
@@ -547,22 +564,27 @@ func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 		}
 	case *Pointer:
 		if kept, isPointer := kept.(*Pointer); isPointer {
+			typed(kept)
 			folds.add(folded.base, kept.base, builds)
 		}
 	case *Slice:
 		if kept, isSlice := kept.(*Slice); isSlice {
+			typed(kept)
 			folds.add(folded.elem, kept.elem, builds)
 		}
 	case *Array:
 		if kept, isArray := kept.(*Array); isArray {
+			typed(kept)
 			folds.add(folded.elem, kept.elem, builds)
 		}
 	case *Chan:
 		if kept, isChan := kept.(*Chan); isChan {
+			typed(kept)
 			folds.add(folded.elem, kept.elem, builds)
 		}
 	case *Map:
 		if kept, isMap := kept.(*Map); isMap {
+			typed(kept)
 			folds.add(folded.key, kept.key, builds)
 			folds.add(folded.elem, kept.elem, builds)
 		}
@@ -573,6 +595,7 @@ func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 		}
 	case *Interface:
 		if kept, isInterface := kept.(*Interface); isInterface && len(kept.methods) == len(folded.methods) {
+			typed(kept)
 			for index, method := range folded.methods {
 				if method.name == kept.methods[index].name {
 					object(method, kept.methods[index])
@@ -588,8 +611,19 @@ func (folds *typeFolds) add(folded Type, kept Type, builds Mask) {
 	}
 }
 
-// apply names the kept answer's objects in every Info answer that names a folded answer's.
+// apply names the kept answer's objects in every Info answer that names a folded answer's, and gives the kept
+// answer's types to every expression that has a folded answer's.
 func (folds *typeFolds) apply(logs *infoLogs) {
+	if len(folds.types) > 0 {
+		logs.types.remap(func(answer TypeAndValue) (TypeAndValue, bool) {
+			kept, folded := folds.types[answer.Type]
+			if !folded {
+				return answer, false
+			}
+			answer.Type = kept
+			return answer, true
+		})
+	}
 	if len(folds.objects) == 0 {
 		return
 	}
@@ -608,6 +642,179 @@ func (folds *typeFolds) apply(logs *infoLogs) {
 		remapped.obj = kept
 		return &remapped, true
 	})
+}
+
+// declaredRemaps give a Types answer that holds the one signature of a function, or of a variable of function type,
+// declared again by build, as a unit that never split on it read it, each build's own declaration's signature in its
+// place (objectVariation.declared): the function's own type for its name, its results for a call of it, and the
+// signature a method value or a method expression makes of it. A function declared with type parameters is left as
+// the unit read it.
+type declaredRemaps struct {
+	// signatures are, for each build, each signature a unit read with the build's own declaration's, where it is
+	// another.
+	signatures [8]map[*Signature]*Signature
+	// owners are the signature a unit read that each receiver, parameter and result of one belongs to.
+	owners map[*Var]*Signature
+	// answered are the types already given for a build, so one type of a unit is one type of the build.
+	answered map[declaredAnswer]Type
+}
+
+// declaredAnswer is a type a unit read, in a build.
+type declaredAnswer struct {
+	typ   Type
+	build int
+}
+
+// declaredSignatures is the remapping of the check's Types answers to each build's own declaration's signatures, or
+// nil when its Uses and Selections name no function declared again by build with one type: the functions are found
+// through those maps, so a check given neither gets none.
+func (logs *infoLogs) declaredSignatures(all Mask) func(TypeAndValue, Mask) (TypeAndValue, bool) {
+	remaps := &declaredRemaps{}
+	note := func(named Object) {
+		if variation := variationOf(named); variation != nil && variation.declared != nil {
+			remaps.note(named.(interface{ base() *object }).base(), all)
+		}
+	}
+	for _, object := range logs.uses.plain {
+		note(object)
+	}
+	for _, answers := range logs.uses.staged {
+		note(answers.first.value)
+		for _, answer := range answers.more {
+			note(answer.value)
+		}
+	}
+	for _, selection := range logs.selections.plain {
+		note(selection.obj)
+	}
+	for _, answers := range logs.selections.staged {
+		note(answers.first.value.obj)
+		for _, answer := range answers.more {
+			note(answer.value.obj)
+		}
+	}
+	if remaps.owners == nil {
+		return nil
+	}
+	return remaps.inBuild
+}
+
+// note adds function's signatures as units read them, each with the declaration's of each of all's builds that
+// declares it otherwise. function is a function's base, or that of a variable of function type.
+func (remaps *declaredRemaps) note(function *object, all Mask) {
+	for build := range 8 {
+		mask := Mask(1) << build
+		if all&mask == 0 {
+			continue
+		}
+		read := function.typ
+		for _, variant := range function.variation.variants {
+			if variant.mask&mask != 0 {
+				read = variant.typ
+			}
+		}
+		for _, declared := range function.variation.declared {
+			readSignature, _ := read.(*Signature)
+			declaredSignature, _ := declared.typ.(*Signature)
+			if declared.mask&mask == 0 || readSignature == declaredSignature || readSignature == nil ||
+				declaredSignature == nil || readSignature.tparams != nil {
+				continue
+			}
+			if remaps.signatures[build] == nil {
+				remaps.signatures[build] = map[*Signature]*Signature{}
+			}
+			remaps.signatures[build][readSignature] = declaredSignature
+			if remaps.owners == nil {
+				remaps.owners = map[*Var]*Signature{}
+				remaps.answered = map[declaredAnswer]Type{}
+			}
+			if readSignature.recv != nil {
+				remaps.owners[readSignature.recv] = readSignature
+			}
+			for _, tuple := range []*Tuple{readSignature.params, readSignature.results} {
+				for index := range tuple.Len() {
+					remaps.owners[tuple.At(index)] = readSignature
+				}
+			}
+		}
+	}
+}
+
+// inBuild is answer as build has it, and whether that differs from answer.
+func (remaps *declaredRemaps) inBuild(answer TypeAndValue, build Mask) (TypeAndValue, bool) {
+	index := bits.TrailingZeros8(uint8(build))
+	if len(remaps.signatures[index]) == 0 {
+		return answer, false
+	}
+	switch answer.Type.(type) {
+	case *Signature, *Tuple:
+	default:
+		return answer, false
+	}
+	key := declaredAnswer{answer.Type, index}
+	typ, answered := remaps.answered[key]
+	if !answered {
+		typ = remaps.typeInBuild(answer.Type, remaps.signatures[index])
+		remaps.answered[key] = typ
+	}
+	if typ == answer.Type {
+		return answer, false
+	}
+	answer.Type = typ
+	return answer, true
+}
+
+// typeInBuild is typ, a signature or a tuple, with the build's own declaration's signature, declared, in the place
+// of the one a unit read, when typ is made of one.
+func (remaps *declaredRemaps) typeInBuild(typ Type, declared map[*Signature]*Signature) Type {
+	switch typ := typ.(type) {
+	case *Tuple:
+		// A call's results are its function's.
+		if read := remaps.owners[typ.At(0)]; read != nil && typ == read.results && declared[read] != nil {
+			return declared[read].results
+		}
+	case *Signature:
+		if own := declared[typ]; own != nil {
+			return own
+		}
+		switch {
+		case typ.recv == nil && typ.recvold != nil && typ.recvold != methodExprSentinel:
+			// A method value's signature is its method's without the receiver, which it keeps aside.
+			if own := declared[remaps.owners[typ.recvold]]; own != nil {
+				value := *own
+				value.recvold = own.recv
+				value.recv = nil
+				return &value
+			}
+		case typ.recvold == methodExprSentinel && typ.params.Len() > 0:
+			// A method expression's is its method's with the receiver as its first parameter, named as the selector
+			// names it (Checker.selector).
+			var read *Signature
+			if typ.results.Len() > 0 {
+				read = remaps.owners[typ.results.At(0)]
+			} else if typ.params.Len() > 1 {
+				read = remaps.owners[typ.params.At(1)]
+			}
+			own := declared[read]
+			if own == nil || own.recv == nil {
+				break
+			}
+			name := ""
+			if own.params.Len() > 0 && own.params.At(0).name != "" {
+				name = own.recv.name
+				if name == "" {
+					name = "_"
+				}
+			}
+			parameters := []*Var{NewParam(own.recv.pos, own.recv.pkg, name, typ.params.At(0).typ)}
+			if own.params != nil {
+				parameters = append(parameters, own.params.vars...)
+			}
+			return &Signature{tparams: own.tparams, recvold: methodExprSentinel, params: NewTuple(parameters...),
+				results: own.results, variadic: own.variadic}
+		}
+	}
+	return typ
 }
 
 // sameSelection reports whether two selections answer alike: one kind, one object reached the same way, and receivers

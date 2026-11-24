@@ -928,15 +928,33 @@ func SetVariants(obj Object, variants []Variant) {
 		base.ensureVariation().variants = collapsed
 	}
 	// A function's signatures alike in type are each build's own all the same, for a read as one build.
-	if _, isFunc := obj.(*Func); isFunc {
-		given := make([]objectVariant, len(variants))
-		for index, variant := range variants {
-			given[index] = objectVariant{mask: variant.Builds, typ: variant.Type, val: variant.Value}
-		}
+	given := make([]objectVariant, len(variants))
+	for index, variant := range variants {
+		given[index] = objectVariant{mask: variant.Builds, typ: variant.Type, val: variant.Value}
+	}
+	if declaresSignatures(obj, given) {
 		if declared := declaredAnswers(given, collapsed); declared != nil {
 			base.ensureVariation().declared = declared
 		}
 	}
+}
+
+// declaresSignatures reports whether obj's answers are signatures that each declare their own parameters and
+// results, which nothing but their own declaration names: a function's, and a variable's whose type is a function
+// type in every answer.
+func declaresSignatures(obj Object, answers []objectVariant) bool {
+	switch obj.(type) {
+	case *Func:
+		return true
+	case *Var:
+		for _, answer := range answers {
+			if _, isSignature := answer.typ.(*Signature); !isSignature {
+				return false
+			}
+		}
+		return len(answers) > 0
+	}
+	return false
 }
 
 // declaredAnswers are answers, a function's as each of its declarations gave them, with those that are one type
@@ -1231,9 +1249,9 @@ func appendVariant(variants []objectVariant, variant objectVariant) []objectVari
 	return append(variants, variant)
 }
 
-// sameAnswer reports whether two answers are alike: identical types, equal values when they are constants, and one
-// list of type parameters when they are a generic type's, since a right-hand side that never names its type
-// parameters is identical across declarations whose constraints differ.
+// sameAnswer reports whether two answers are alike: identical types, methods' receivers alike (sameReceiver), equal
+// values when they are constants, and one list of type parameters when they are a generic type's, since a right-hand
+// side that never names its type parameters is identical across declarations whose constraints differ.
 func sameAnswer(left objectVariant, right objectVariant) bool {
 	if left.tparams != right.tparams {
 		return false
@@ -1241,13 +1259,27 @@ func sameAnswer(left objectVariant, right objectVariant) bool {
 	if (left.typ == nil) != (right.typ == nil) {
 		return false
 	}
-	if left.typ != nil && !Identical(left.typ, right.typ) {
+	if left.typ != nil && (!Identical(left.typ, right.typ) || !sameReceiver(left.typ, right.typ)) {
 		return false
 	}
 	if (left.val == nil) != (right.val == nil) {
 		return false
 	}
 	return left.val == nil || left.val.Kind() == right.val.Kind() && left.val.ExactString() == right.val.ExactString()
+}
+
+// sameReceiver reports whether two identical types, when they are methods' signatures, take their receiver alike: both
+// by value or both by pointer. Identical never compares receivers, and a method is in its type's own method set only
+// when its receiver is no pointer, so a unit that reads the one for the other answers a method set wrongly.
+func sameReceiver(left Type, right Type) bool {
+	leftSignature, _ := left.(*Signature)
+	rightSignature, _ := right.(*Signature)
+	if leftSignature == nil || rightSignature == nil || leftSignature.recv == nil || rightSignature.recv == nil {
+		return true
+	}
+	_, leftPointer := deref(leftSignature.recv.typ)
+	_, rightPointer := deref(rightSignature.recv.typ)
+	return leftPointer == rightPointer
 }
 
 // declaredHere is where method is declared in the current unit's builds: a method declared again in other builds'
@@ -2163,8 +2195,9 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 		collapsed = appendVariant(collapsed, answer)
 	}
 	// An answer folded into an alike one of another run declares objects of its own (a struct's fields), which no
-	// read answers with: the kept answer's stand in for them.
-	if _, isFunc := obj.(*Func); !isFunc {
+	// read answers with: the kept answer's stand in for them. A signature's stay each run's own, and a read as one
+	// build answers with that build's (declared, below).
+	if !declaresSignatures(obj, answers) {
 		for _, answer := range answers {
 			for _, kept := range collapsed {
 				if sameAnswer(kept, answer) {
@@ -2209,8 +2242,9 @@ func (check *Checker) declareVariational(obj Object, d *declInfo) {
 		variation.variants = collapsed
 	}
 	// A function's signatures alike in type are each run's own all the same, for a read as one build: its parameters
-	// are the objects its body names in that run's builds, which no fold replaces.
-	if _, isFunc := obj.(*Func); isFunc {
+	// are the objects its body names in that run's builds, which no fold replaces. A variable of function type's
+	// likewise.
+	if declaresSignatures(obj, answers) {
 		if declared := declaredAnswers(answers, collapsed); declared != nil {
 			base.ensureVariation().declared = declared
 		}
