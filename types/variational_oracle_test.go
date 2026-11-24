@@ -65,6 +65,9 @@ type accessorOracle struct {
 	// are matched by (children).
 	gotNodes  map[*types.Scope]ast.Node
 	wantNodes map[*types.Scope]ast.Node
+	// files are every file of the fixture, the ones the build doesn't compile among them, which Eval is asked at
+	// (asked).
+	files []*ast.File
 }
 
 // oraclePair is the value of the other side a value was first met beside, and where.
@@ -515,7 +518,9 @@ func (oracle *accessorOracle) compareSides(got oracleSide, want oracleSide) {
 // asked compares what the accessors that take a node or a position answer, which reflection can't call, each asked
 // of both sides with the plain check's own nodes: Info's TypeOf of each expression, ObjectOf of each identifier and
 // PkgNameOf of each import, and the package scope's Innermost at each identifier. They come last, so what they
-// answer is held to the objects and scopes the build's own maps name.
+// answer is held to the objects and scopes the build's own maps name. Eval is asked too, of a literal at the package
+// clause of every file of the fixture: in a file the build doesn't compile the position is none of its package's,
+// and Eval says so of both.
 func (oracle *accessorOracle) asked(got oracleSide, want oracleSide) {
 	object := func(object types.Object) reflect.Value { return reflect.ValueOf(&object).Elem() }
 	defer func() { oracle.asking = "" }()
@@ -558,6 +563,19 @@ func (oracle *accessorOracle) asked(got oracleSide, want oracleSide) {
 			oracle.compare("Info.PkgNameOf("+nodeKey(oracle.fileSet, spec)+")", "*types.Info.PkgNameOf",
 				object(got.held.PkgNameOf(spec)), object(want.held.PkgNameOf(spec)))
 		}
+	}
+	oracle.asking = "types.Eval"
+	evaluated := func(checked *types.Package, position token.Pos) reflect.Value {
+		answer, evalError := types.Eval(oracle.fileSet, checked, position, "0")
+		if evalError != nil {
+			return reflect.ValueOf("error: " + evalError.Error())
+		}
+		return reflect.ValueOf(answer.Type.String())
+	}
+	for _, file := range oracle.files {
+		position := file.Name.Pos()
+		oracle.compare("Eval(0 at "+oracle.place(position)+")", "types.Eval", evaluated(got.checked, position),
+			evaluated(want.checked, position))
 	}
 }
 
@@ -635,6 +653,7 @@ func runAccessorOracle(test *testing.T, name string, fixtures []fixtureFile, tot
 		}
 		for _, view := range slices.Sorted(maps.Keys(views)) {
 			oracle := newAccessorOracle(fileSet)
+			oracle.files = parsed.files
 			views[view](func() { oracle.compareSides(projected, plain) })
 			if oracle.compared < 100 {
 				test.Errorf("%s: the oracle compared %d answers, and the smallest fixture holds more", view, oracle.compared)
