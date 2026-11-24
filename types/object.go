@@ -106,7 +106,10 @@ type object struct {
 
 // Parent returns the scope in which the object is declared.
 // The result is nil for methods and struct fields.
-func (obj *object) Parent() *Scope { return obj.parent }
+//
+// cohere's variational spike: read as one build, a parameter of a function whose body ran again for the build is in
+// the scope of that run (Scope.here).
+func (obj *object) Parent() *Scope { return obj.parent.here() }
 
 // Pos returns the declaration position of the object's identifier.
 func (obj *object) Pos() token.Pos {
@@ -473,7 +476,8 @@ func (obj *Func) FullName() string {
 // (but there is also no mechanism to get to an instantiated function).
 //
 // cohere's variational spike: a function declared again by build has the scope of each build's own signature.
-func (obj *Func) Scope() *Scope { return obj.Type().(*Signature).scope }
+// Read as one build, it is the scope the body ran in for the build (Scope.here).
+func (obj *Func) Scope() *Scope { return obj.Type().(*Signature).scope.here() }
 
 // Origin returns the canonical Func for its receiver, i.e. the Func object
 // recorded in Info.Defs.

@@ -52,8 +52,9 @@ func (s *Scope) Contains(pos token.Pos) bool {
 func (s *Scope) Innermost(pos token.Pos) *Scope {
 	// Package scopes do not have extents since they may be
 	// discontiguous, so iterate over the package's files.
+	// cohere's variational spike: read as one build, the children are the build's own, here and below.
 	if s.parent == Universe {
-		for _, s := range s.children {
+		for _, s := range s.childrenHere() {
 			if inner := s.Innermost(pos); inner != nil {
 				return inner
 			}
@@ -61,7 +62,7 @@ func (s *Scope) Innermost(pos token.Pos) *Scope {
 	}
 
 	if s.Contains(pos) {
-		for _, s := range s.children {
+		for _, s := range s.childrenHere() {
 			if s.Contains(pos) {
 				return s.Innermost(pos)
 			}

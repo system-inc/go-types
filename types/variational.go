@@ -2399,6 +2399,7 @@ func (check *Checker) bodyScope(sig *Signature) *Scope {
 	if node, recorded := check.variational.info.functionNodes[scope]; recorded {
 		check.recordScope(node, run)
 	}
+	check.variational.info.noteRerun(scope, run)
 	return run
 }
 

@@ -38,12 +38,15 @@ type Scope struct {
 	// for other builds starts from the signature alone
 	bodyRan      bool
 	bodyChildren int
+	// what the scope holds by build once its check has ended, when it or one of its children isn't every build's
+	// (variational_scopes.go); nil for every other scope
+	byBuild *scopeBuilds
 }
 
 // NewScope returns a new, empty scope contained in the given parent
 // scope, if any. The comment is for debugging only.
 func NewScope(parent *Scope, pos, end token.Pos, comment string) *Scope {
-	s := &Scope{parent, nil, 0, nil, pos, end, comment, false, nil, false, 0}
+	s := &Scope{parent, nil, 0, nil, pos, end, comment, false, nil, false, 0, nil}
 	// don't add children to Universe scope!
 	if parent != nil && parent != Universe {
 		parent.children = append(parent.children, s)
@@ -82,10 +85,12 @@ func (s *Scope) Names() []string {
 }
 
 // NumChildren returns the number of scopes nested in s.
-func (s *Scope) NumChildren() int { return len(s.children) }
+//
+// cohere's variational spike: read as one build, the children are the build's own (childrenHere), here and in Child.
+func (s *Scope) NumChildren() int { return len(s.childrenHere()) }
 
 // Child returns the i'th child scope for 0 <= i < NumChildren().
-func (s *Scope) Child(i int) *Scope { return s.children[i] }
+func (s *Scope) Child(i int) *Scope { return s.childrenHere()[i] }
 
 // Lookup returns the object in scope s with the given name if such an
 // object exists; otherwise the result is nil.
@@ -202,7 +207,8 @@ func (s *Scope) WriteTo(w io.Writer, n int, recurse bool) {
 	}
 
 	if recurse {
-		for _, s := range s.children {
+		// cohere's variational spike: read as one build, the children are the build's own.
+		for _, s := range s.childrenHere() {
 			s.WriteTo(w, n+1, recurse)
 		}
 	}

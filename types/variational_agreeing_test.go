@@ -512,6 +512,18 @@ func (spelling *reachSpelling) function(function *types.Func) {
 	scope := function.Scope()
 	fmt.Fprintf(&spelling.builder, "\n function %s, signature %s, scope %s", function.FullName(),
 		spellSignature(signature), spellScope(spelling.fileSet, scope))
+	// Its scope whole, the scope its parameters are in, and the scope found at its place.
+	if scope != nil {
+		spelling.builder.WriteString(spellScopeTree(spelling.fileSet, scope, "\n  "))
+		for index := range typed.Params().Len() {
+			if parent := typed.Params().At(index).Parent(); parent != nil {
+				fmt.Fprintf(&spelling.builder, "\n parameter %d in %s", index, spellScopePlace(spelling.fileSet, parent))
+			}
+		}
+		if inner := spelling.checked.Scope().Innermost(scope.Pos()); inner != nil {
+			fmt.Fprintf(&spelling.builder, "\n innermost %s", spellScopePlace(spelling.fileSet, inner))
+		}
+	}
 	if signature != typed {
 		spelling.disagree("%s: Signature is %s, and Type %s", function.Name(), spellSignature(signature),
 			spellSignature(typed))
@@ -629,6 +641,16 @@ func (spelling *reachSpelling) held(object types.Object) string {
 	return spelling.builder.String()
 }
 
+// spellScopeTree spells scope and every scope beneath it, each by its place, the names it declares and how many
+// children it has, on a line of its own after indent.
+func spellScopeTree(fileSet *token.FileSet, scope *types.Scope, indent string) string {
+	spelled := fmt.Sprintf("%s%s, %d children", indent, spellScopePlace(fileSet, scope), scope.NumChildren())
+	for child := range scope.Children() {
+		spelled += spellScopeTree(fileSet, child, indent+" ")
+	}
+	return spelled
+}
+
 // heldAspects are the reads of one property each of an object the reader holds already: its type, a constant's
 // value, a function's signature, full name and scope, and a type name's underlying type, its methods' names by index,
 // and its interface's methods' names.
@@ -643,6 +665,16 @@ func heldAspects(object types.Object) map[string]func() string {
 				return "no scope"
 			}
 			return fmt.Sprintf("%d %s", scope.Pos(), strings.Join(scope.Names(), " "))
+		}
+		aspects["its parameters' scopes"] = func() string {
+			spelled := ""
+			parameters := function.Signature().Params()
+			for index := range parameters.Len() {
+				if parent := parameters.At(index).Parent(); parent != nil {
+					spelled += fmt.Sprintf("%d %s; ", parent.Pos(), strings.Join(parent.Names(), " "))
+				}
+			}
+			return spelled
 		}
 	}
 	if constantObject, isConstant := object.(*types.Const); isConstant {
@@ -845,6 +877,8 @@ func requireAgreement(test *testing.T, label string, fileSet *token.FileSet, che
 		read func() string
 	}{
 		{"scope names", func() string { return strings.Join(checked.Scope().Names(), " ") }},
+		{"scope tree", func() string { return spellScopeTree(fileSet, checked.Scope(), "") }},
+		{"scope tree's children counted", func() string { return fmt.Sprint(checked.Scope().NumChildren()) }},
 		{"scope length", func() string { return fmt.Sprint(checked.Scope().Len()) }},
 		{"imports", func() string {
 			var paths []string

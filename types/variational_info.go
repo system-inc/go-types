@@ -326,6 +326,10 @@ type infoLogs struct {
 	// fileBuilds is the builds each file compiles in, for an answer written outside every unit, which holds where the
 	// file of its key compiles.
 	fileBuilds map[*token.File]Mask
+	// made are the scopes the check recorded, in the order it made them, and reruns the scopes each function's body
+	// ran again in: what the scope tree is settled from when the check ends (variational_scopes.go).
+	made   []*Scope
+	reruns map[*Scope]*bodyReruns
 }
 
 // infoMarks are each log's undo length at a unit's start.
@@ -381,6 +385,10 @@ func (check *Checker) startInfo() {
 	state.info.selections.plain = check.Selections
 	state.info.instances.plain = check.Instances
 	state.info.scopes.plain = check.Scopes
+	// The scopes are kept whether or not the caller gave a map for them: the scope tree is settled from them.
+	if check.Scopes == nil {
+		state.info.scopes.plain = map[ast.Node]*Scope{}
+	}
 	state.info.functionNodes = map[*Scope]ast.Node{}
 	state.info.fileBuilds = make(map[*token.File]Mask, len(state.variation.Files))
 	for file, builds := range state.variation.Files {
@@ -432,6 +440,7 @@ func (check *Checker) endInfo() {
 			return &variation.Overlays[build].Instances
 		}, sameInstance, nil)
 	}
+	logs.settleScopes(all)
 	// Each run of a unit makes its own scopes, which hold that run's objects, so a scope is the same answer only as
 	// itself: a build answered by another run's scope gets its own in its overlay.
 	if check.Scopes != nil {
