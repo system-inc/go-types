@@ -23,6 +23,17 @@ type W struct{}
 func Caller() error { return Remove("x") }
 
 func MethodCaller(w W) int { return w.Size("x") }
+
+func Quiet() {}
+
+// QuietCaller calls functions with no results as statements, beside the functions declared again by build: such a
+// call's type is the function's results, of which there are none.
+func QuietCaller(w W) {
+	Quiet()
+	w.Touch()
+	func() {}()
+	_ = Variadic()
+}
 `},
 	{"declared_unix.go", buildDarwin | buildLinux, `package fork
 
@@ -34,6 +45,10 @@ func Remove(name string) (failure error) {
 func (w W) Size(unix string) (size int) { return len(unix) }
 
 func (w W) Reset() {}
+
+func (w W) Touch() {}
+
+func Variadic(unix ...string) int { return len(unix) }
 `},
 	{"declared_windows.go", buildWindows, `package fork
 
@@ -45,6 +60,10 @@ func Remove(path string) (problem error) {
 func (receiver W) Size(windows string) (length int) { return len(windows) }
 
 func (receiver *W) Reset() {}
+
+func (receiver W) Touch() {}
+
+func Variadic(windows ...string) int { return len(windows) }
 `},
 	{"only_darwin.go", buildDarwin, "package fork\n\nfunc Only(first int) int { return first }\n"},
 	{"only_linux.go", buildLinux, "package fork\n\nfunc Only(second int) int { return second }\n"},
@@ -483,7 +502,8 @@ func TestVariationalAUnitCallingADeclaredAgainFunctionRunsOnce(test *testing.T) 
 
 // declaredTypesUserFiles are a package that names declaredFiles' function and methods from another package every
 // way an expression's type can hold their signatures: the function itself, a method value, a method expression, and
-// a call.
+// a call, with a method that has no parameters and no results, a variadic function, and calls whose type is no
+// result at all.
 var declaredTypesUserFiles = []fixtureFile{
 	{"user.go", everyBuild, `package user
 
@@ -496,6 +516,18 @@ func Value(w fork.W) func(string) int { return w.Size }
 var Expression = fork.W.Size
 
 func Call() error { return fork.Remove("x") }
+
+func Touched(w fork.W) func() { return w.Touch }
+
+var TouchExpression = fork.W.Touch
+
+var Spread = fork.Variadic
+
+func Quiet(w fork.W) {
+	w.Touch()
+	fork.Variadic()
+	fork.Variadic("a", "b")
+}
 `},
 }
 
@@ -538,6 +570,15 @@ func TestVariationalACallersTypesHoldEachBuildsOwnSignature(test *testing.T) {
 					test.Errorf("build %03b: the type of fork.Remove names its parameter %s, and the build's own signature %s",
 						build, signature.Params().At(0).Name(), removeSignature.Params().At(0).Name())
 				}
+			case "fork.Variadic":
+				var variadic *types.Signature
+				types.InBuild(build, func() {
+					variadic = checked.Scope().Lookup("Variadic").(*types.Func).Signature()
+				})
+				if signature != variadic || !signature.Variadic() {
+					test.Errorf("build %03b: the type of fork.Variadic is %s, and the build's own signature %s", build, signature,
+						variadic)
+				}
 			case "w.Size":
 				if signature.Params().At(0) != sizeSignature.Params().At(0) ||
 					signature.Results().At(0) != sizeSignature.Results().At(0) {
@@ -554,7 +595,8 @@ func TestVariationalACallersTypesHoldEachBuildsOwnSignature(test *testing.T) {
 				}
 			}
 		}
-		for _, spelled := range []string{"fork.Remove", "w.Size", "fork.W.Size"} {
+		for _, spelled := range []string{"fork.Remove", "w.Size", "fork.W.Size", "fork.Variadic", "w.Touch",
+			"fork.W.Touch", "w.Touch()", "fork.Variadic()"} {
 			if !met[spelled] {
 				test.Errorf("build %03b: no Types entry for %s", build, spelled)
 			}

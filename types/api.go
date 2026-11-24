@@ -329,6 +329,10 @@ type Info struct {
 	// Version strings begin with “go”, like “go1.21”, and
 	// are suitable for use with the [go/version] package.
 	FileVersions map[*ast.File]string
+
+	// cohere's variational spike: the variation of the variational check that filled the maps, whose overlays TypeOf,
+	// ObjectOf and PkgNameOf answer from when read as one build; nil for every other Info
+	byBuild *Variation
 }
 
 func (info *Info) recordTypes() bool {
@@ -338,6 +342,12 @@ func (info *Info) recordTypes() bool {
 // TypeOf returns the type of expression e, or nil if not found.
 // Precondition: the Types, Uses and Defs maps are populated.
 func (info *Info) TypeOf(e ast.Expr) Type {
+	// cohere's variational spike: read as one build, the maps answer as the build's overlay over them does.
+	if info.byBuild != nil {
+		if state := viewState(); state != nil {
+			return info.typeOfHere(e, state)
+		}
+	}
 	if t, ok := info.Types[e]; ok {
 		return t.Type
 	}
@@ -357,6 +367,12 @@ func (info *Info) TypeOf(e ast.Expr) Type {
 //
 // Precondition: the Uses and Defs maps are populated.
 func (info *Info) ObjectOf(id *ast.Ident) Object {
+	// cohere's variational spike: read as one build, the maps answer as the build's overlay over them does.
+	if info.byBuild != nil {
+		if state := viewState(); state != nil {
+			return answerHere(info, state, func(in infoIn) Object { return in.objectOf(id) })
+		}
+	}
 	if obj := info.Defs[id]; obj != nil {
 		return obj
 	}
@@ -370,6 +386,12 @@ func (info *Info) ObjectOf(id *ast.Ident) Object {
 //
 // Precondition: the Defs and Implicts maps are populated.
 func (info *Info) PkgNameOf(imp *ast.ImportSpec) *PkgName {
+	// cohere's variational spike: read as one build, the maps answer as the build's overlay over them does.
+	if info.byBuild != nil {
+		if state := viewState(); state != nil {
+			return answerHere(info, state, func(in infoIn) *PkgName { return in.pkgNameOf(imp) })
+		}
+	}
 	var obj Object
 	if imp.Name != nil {
 		obj = info.Defs[imp.Name]

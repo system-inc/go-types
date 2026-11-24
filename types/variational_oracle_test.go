@@ -445,8 +445,17 @@ func (oracle *accessorOracle) asked(got oracleSide, want oracleSide) {
 	expressions := slices.SortedFunc(maps.Keys(want.held.Types), func(left ast.Expr, right ast.Expr) int {
 		return strings.Compare(positionKey(oracle.fileSet, left), positionKey(oracle.fileSet, right))
 	})
+	// An expression is asked of each side by that side's own node at its place: a checker makes some nodes afresh.
+	ownNodes := make(map[string]ast.Expr, len(got.info.Types))
+	for expression := range got.info.Types {
+		ownNodes[positionKey(oracle.fileSet, expression)] = expression
+	}
 	for _, expression := range expressions {
-		gotType, wantType := got.held.TypeOf(expression), want.held.TypeOf(expression)
+		var gotType types.Type
+		if own := ownNodes[positionKey(oracle.fileSet, expression)]; own != nil {
+			gotType = got.held.TypeOf(own)
+		}
+		wantType := want.held.TypeOf(expression)
 		oracle.compare("Info.TypeOf("+positionKey(oracle.fileSet, expression)+")", "*types.Info.TypeOf",
 			reflect.ValueOf(&gotType).Elem(), reflect.ValueOf(&wantType).Elem())
 	}

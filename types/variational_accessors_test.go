@@ -2,6 +2,7 @@ package types_test
 
 import (
 	"fmt"
+	"go/ast"
 	"go/token"
 	"path/filepath"
 	"slices"
@@ -181,6 +182,124 @@ func TestVariationalAccessorsAnswerByBuild(test *testing.T) {
 						test.Errorf("%s under Agreeing as %03b: agreeing %03b, want %03b", read.name, build, agreeing, agree)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestVariationalInfoAccessorsAnswerByBuild checks the kinds fixture, whose Choice is a constant on darwin and linux
+// and a variable on windows, and the imports fixture, whose files import by build, with every Info map, and asks the
+// Info itself, the one the check was given, under InBuild for each build: TypeOf of every expression, ObjectOf of
+// every identifier and PkgNameOf of every import answer what the build's projection of the maps holds, where the
+// maps themselves hold the host's. Under Agreeing each leaves the builds that answer alike.
+func TestVariationalInfoAccessorsAnswerByBuild(test *testing.T) {
+	test.Parallel()
+	for name, fixtures := range map[string][]fixtureFile{"kinds": kindFiles, "imports": importFiles} {
+		test.Run(name, func(test *testing.T) {
+			test.Parallel()
+			fileSet := token.NewFileSet()
+			parsed := parseFixture(test, fileSet, fixtures)
+			variation := &types.Variation{Builds: everyBuild, Files: parsed.masks}
+			info := fullInfo()
+			if _, checkError := (&types.Config{Variation: variation, Importer: fixtureImporter{}}).Check("fork", fileSet,
+				parsed.files, info); checkError != nil {
+				test.Fatal(checkError)
+			}
+			asked := 0
+			for index, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
+				overlays := types.BuildOverlays{}
+				if index > 0 {
+					overlays = variation.Overlays[index]
+				}
+				typesOf := project(info.Types, overlays.Types)
+				defs, uses := project(info.Defs, overlays.Defs), project(info.Uses, overlays.Uses)
+				implicits := project(info.Implicits, overlays.Implicits)
+				types.InBuild(build, func() {
+					// Every expression and identifier any build answers, so one the build lacks is asked too.
+					for _, every := range variation.Overlays[:3] {
+						for expression := range project(info.Types, every.Types) {
+							want := typesOf[expression].Type
+							// With no entry, TypeOf answers an identifier with its object's type.
+							if _, isIdent := expression.(*ast.Ident); isIdent && want == nil {
+								continue
+							}
+							if got := info.TypeOf(expression); got != want {
+								test.Errorf("build %03b: TypeOf(%s at %s) is %v, and the build's Types holds %v", build,
+									types.ExprString(expression), fileSet.Position(expression.Pos()), got, want)
+							}
+							asked++
+						}
+						for _, idents := range []map[*ast.Ident]types.Object{project(info.Defs, every.Defs),
+							project(info.Uses, every.Uses)} {
+							for ident := range idents {
+								want := defs[ident]
+								if want == nil {
+									want = uses[ident]
+								}
+								if got := info.ObjectOf(ident); got != want {
+									test.Errorf("build %03b: ObjectOf(%s at %s) is %v, and the build's Defs and Uses hold %v", build,
+										ident.Name, fileSet.Position(ident.Pos()), got, want)
+								}
+								asked++
+							}
+						}
+					}
+					for _, file := range parsed.files {
+						for _, spec := range file.Imports {
+							var want types.Object = implicits[spec]
+							if spec.Name != nil {
+								want = defs[spec.Name]
+							}
+							wantName, _ := want.(*types.PkgName)
+							if got := info.PkgNameOf(spec); got != wantName {
+								test.Errorf("build %03b: PkgNameOf(%s at %s) is %v, and the build's maps hold %v", build,
+									spec.Path.Value, fileSet.Position(spec.Pos()), got, wantName)
+							}
+							asked++
+						}
+					}
+				})
+			}
+			if asked == 0 {
+				test.Error("nothing was asked of the Info")
+			}
+			if name != "kinds" {
+				return
+			}
+			// In the shared file, the use of Choice names a constant on darwin and linux and a variable on windows, and
+			// ChoiceValue is one variable of one type in every build.
+			unix := buildDarwin | buildLinux
+			shared := map[*ast.Ident]bool{}
+			for _, idents := range []map[*ast.Ident]types.Object{info.Defs, info.Uses} {
+				for ident := range idents {
+					shared[ident] = fileSet.Position(ident.Pos()).Filename == "shared.go"
+				}
+			}
+			agreed := 0
+			for ident, inShared := range shared {
+				want := map[types.Mask]types.Mask{buildDarwin: everyBuild, buildLinux: everyBuild, buildWindows: everyBuild}
+				if ident.Name == "Choice" {
+					want = map[types.Mask]types.Mask{buildDarwin: unix, buildLinux: unix, buildWindows: buildWindows}
+				} else if ident.Name != "ChoiceValue" {
+					continue
+				}
+				if !inShared {
+					continue
+				}
+				agreed++
+				for build, agree := range want {
+					if agreeing := types.Agreeing(build, everyBuild, func() { _ = info.ObjectOf(ident) }); agreeing != agree {
+						test.Errorf("ObjectOf(%s) under Agreeing as %03b: agreeing %03b, want %03b", ident.Name, build, agreeing,
+							agree)
+					}
+					if agreeing := types.Agreeing(build, everyBuild, func() { _ = info.TypeOf(ident) }); agreeing != agree {
+						test.Errorf("TypeOf(%s) under Agreeing as %03b: agreeing %03b, want %03b", ident.Name, build, agreeing,
+							agree)
+					}
+				}
+			}
+			if agreed != 2 {
+				test.Errorf("%d identifiers of the shared file were read under Agreeing, want Choice and ChoiceValue", agreed)
 			}
 		})
 	}

@@ -441,6 +441,8 @@ func (check *Checker) endInfo() {
 		}, sameInstance, nil)
 	}
 	logs.settleScopes(all)
+	// The Info's own accessors answer by build from the overlays (infoIn).
+	check.Info.byBuild = variation
 	// Each run of a unit makes its own scopes, which hold that run's objects, so a scope is the same answer only as
 	// itself: a build answered by another run's scope gets its own in its overlay.
 	if check.Scopes != nil {
@@ -449,6 +451,113 @@ func (check *Checker) endInfo() {
 		}, func(left *Scope, right *Scope) bool { return left == right }, nil)
 	}
 	state.info = infoLogs{}
+}
+
+// infoIn is an Info a variational check filled as one build has it: its maps, which hold the host's answers, with the
+// build's overlay laid over them. It answers what Info's own accessors answer, for a read as one build.
+type infoIn struct {
+	info     *Info
+	overlays *BuildOverlays // nil for the host, and for a build the check didn't cover
+}
+
+// in is info as the build numbered build has it.
+func (info *Info) in(build int) infoIn {
+	if build == 0 || build >= len(info.byBuild.Overlays) {
+		return infoIn{info: info}
+	}
+	return infoIn{info, &info.byBuild.Overlays[build]}
+}
+
+// overlaid is the answer for key of plain with overlay laid over it, and whether there is one.
+func overlaid[K comparable, V any](plain map[K]V, overlay *Overlay[K, V], key K) (V, bool) {
+	if overlay != nil {
+		if overlay.Removed[key] {
+			var none V
+			return none, false
+		}
+		if value, set := overlay.Set[key]; set {
+			return value, true
+		}
+	}
+	value, held := plain[key]
+	return value, held
+}
+
+// typeOf is the type the build's Types holds for e, and whether it holds one.
+func (in infoIn) typeOf(e ast.Expr) recordedType {
+	var overlay *Overlay[ast.Expr, TypeAndValue]
+	if in.overlays != nil {
+		overlay = &in.overlays.Types
+	}
+	answer, held := overlaid(in.info.Types, overlay, e)
+	return recordedType{answer.Type, held}
+}
+
+// recordedType is the type a Types map holds for an expression, and whether it holds one.
+type recordedType struct {
+	typ  Type
+	held bool
+}
+
+// objectOf is Info.ObjectOf's own body over the build's Defs and Uses.
+func (in infoIn) objectOf(id *ast.Ident) Object {
+	var defs, uses *Overlay[*ast.Ident, Object]
+	if in.overlays != nil {
+		defs, uses = &in.overlays.Defs, &in.overlays.Uses
+	}
+	if obj, _ := overlaid(in.info.Defs, defs, id); obj != nil {
+		return obj
+	}
+	obj, _ := overlaid(in.info.Uses, uses, id)
+	return obj
+}
+
+// pkgNameOf is Info.PkgNameOf's own body over the build's Defs and Implicits.
+func (in infoIn) pkgNameOf(imp *ast.ImportSpec) *PkgName {
+	var obj Object
+	if imp.Name != nil {
+		var defs *Overlay[*ast.Ident, Object]
+		if in.overlays != nil {
+			defs = &in.overlays.Defs
+		}
+		obj, _ = overlaid(in.info.Defs, defs, imp.Name)
+	} else {
+		var implicits *Overlay[ast.Node, Object]
+		if in.overlays != nil {
+			implicits = &in.overlays.Implicits
+		}
+		obj, _ = overlaid(in.info.Implicits, implicits, ast.Node(imp))
+	}
+	pkgname, _ := obj.(*PkgName)
+	return pkgname
+}
+
+// answerHere is what read answers of info as the one build state reads as has it. An agreement being gathered
+// (Agreeing) keeps the builds whose maps answer the same.
+func answerHere[R comparable](info *Info, state *variationalState, read func(infoIn) R) R {
+	answer := read(info.in(bits.TrailingZeros8(uint8(state.mask))))
+	if state.agreeing != nil {
+		for build := range 8 {
+			if *state.agreeing&(1<<build) != 0 && read(info.in(build)) != answer {
+				*state.agreeing &^= 1 << build
+			}
+		}
+	}
+	return answer
+}
+
+// typeOfHere is Info.TypeOf's own body for a read as the one build state reads as: the type the build's Types holds
+// for e, or else, for an identifier, the type of the object the build's Defs and Uses hold for it.
+func (info *Info) typeOfHere(e ast.Expr, state *variationalState) Type {
+	if recorded := answerHere(info, state, func(in infoIn) recordedType { return in.typeOf(e) }); recorded.held {
+		return recorded.typ
+	}
+	if id, _ := e.(*ast.Ident); id != nil {
+		if obj := answerHere(info, state, func(in infoIn) Object { return in.objectOf(id) }); obj != nil {
+			return obj.Type()
+		}
+	}
+	return nil
 }
 
 // sameTypeAndValue reports whether two answers of an expression are alike: one mode, identical types declaring the
@@ -796,11 +905,17 @@ func (remaps *declaredRemaps) inBuild(answer TypeAndValue, build Mask) (TypeAndV
 func (remaps *declaredRemaps) typeInBuild(typ Type, declared map[*Signature]*Signature) Type {
 	switch typ := typ.(type) {
 	case *Tuple:
-		// A call's results are its function's.
+		// A call's results are its function's, and a call of a function with none has an empty tuple, or none.
+		if typ.Len() == 0 {
+			break
+		}
 		if read := remaps.owners[typ.At(0)]; read != nil && typ == read.results && declared[read] != nil {
 			return declared[read].results
 		}
 	case *Signature:
+		if typ == nil {
+			break
+		}
 		if own := declared[typ]; own != nil {
 			return own
 		}
