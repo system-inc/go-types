@@ -81,6 +81,10 @@ func (pkg *Package) Imports() []*Package {
 	// build's.
 	if pkg.importsByBuild != nil && runningChecks.Load() > 0 {
 		if state := runningState(); state != nil && state.inBuild {
+			// cohere's variational spike: an agreement being gathered (Agreeing) keeps the builds that import the same.
+			if state.agreeing != nil {
+				*state.agreeing &= pkg.importingAs(state.mask)
+			}
 			if imports := pkg.importsByBuild[bits.TrailingZeros8(uint8(state.mask))]; imports != nil {
 				return imports
 			}

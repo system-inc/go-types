@@ -176,6 +176,10 @@ type variationalState struct {
 	// building are the type sets this goroutine is computing for one build each (typeSetIn), so an interface that
 	// reaches itself finds its set in the making, as tset is for a check.
 	building map[buildInterface]*_TypeSet
+	// agreeing, under Agreeing alone, is the builds that have answered every read so far as this state's one build
+	// has: each read that answers by build takes from it the builds that answer otherwise. It is nil for a check, for
+	// hostRead and for a plain InBuild, whose reads pay one nil check for it and nothing more.
+	agreeing *Mask
 }
 
 // buildInterface is an interface's type set in one build.
@@ -252,11 +256,48 @@ func (ityp *Interface) typeSetByBuild(pos token.Pos, state *variationalState) *_
 	}
 	if !sets.alike.Load() {
 		state.narrowed.Add(1)
+		// An agreement being gathered (Agreeing) keeps the builds known to hold the set given.
+		if state.agreeing != nil {
+			*state.agreeing &= mask | sets.holding(partSets[0])
+		}
 	}
 	if len(parts) > 1 {
 		splitAt(state, parts)
 	}
 	return partSets[0]
+}
+
+// holding is the builds whose kept type set is set, or holds exactly what set holds: the same methods and
+// comparability, and term for term the same types. A build whose set no goroutine has kept yet isn't among them,
+// though it may come to hold the same, since telling would compute its set under another build's reads; and terms
+// alike but not the same types (sameTypeSet) aren't either, since a reader of the terms reads their types. A set no
+// build has kept is one still in the making (typeSetIn's building), which holds nothing yet to compare, so no build
+// holds it.
+func (sets *buildTypeSets) holding(set *_TypeSet) Mask {
+	var builds Mask
+	kept := false
+	for build := range sets.sets {
+		other := sets.sets[build].Load()
+		if other == nil {
+			continue
+		}
+		if other == set {
+			kept = true
+			builds |= 1 << build
+			continue
+		}
+		if slices.Equal(other.methods, set.methods) && other.comparable == set.comparable &&
+			slices.EqualFunc(other.terms, set.terms, func(left *term, right *term) bool {
+				return left == right ||
+					left != nil && right != nil && left.tilde == right.tilde && left.typ == right.typ
+			}) {
+			builds |= 1 << build
+		}
+	}
+	if !kept {
+		return 0
+	}
+	return builds
 }
 
 // typeSetIn is ityp's type set in build, computed under state narrowed to build when no goroutine has kept it yet. A
@@ -351,6 +392,25 @@ func (check *Checker) endImports() {
 		}
 	}
 	check.pkg.importsByBuild = &byBuild
+}
+
+// importingAs is the builds whose imports of pkg, a variationally checked package, are build's, a single build's, as
+// Imports answers them: a build the check didn't cover answers with the host's.
+func (pkg *Package) importingAs(build Mask) Mask {
+	imports := func(build int) []*Package {
+		if imports := pkg.importsByBuild[build]; imports != nil {
+			return imports
+		}
+		return pkg.imports
+	}
+	here := imports(bits.TrailingZeros8(uint8(build)))
+	var builds Mask
+	for other := range pkg.importsByBuild {
+		if slices.Equal(imports(other), here) {
+			builds |= 1 << other
+		}
+	}
+	return builds
 }
 
 // depUndo is what one dependency write replaced, so a unit that restarts can put it back.
@@ -503,7 +563,71 @@ func InBuild(build Mask, work func()) {
 	state := &variationalState{all: build, mask: build, depth: 1, inBuild: true}
 	state.register()
 	defer state.unregister()
+	// Inside an agreement being gathered (Agreeing), reads as its build are reads it gathers, and reads as another
+	// build are related to its build by nothing, so they leave it its build alone.
+	if around := state.outer; around != nil && around.agreeing != nil {
+		if around.mask == build {
+			state.agreeing = around.agreeing
+		} else {
+			*around.agreeing &= around.mask
+		}
+	}
 	work()
+}
+
+// Agreeing runs work on the calling goroutine reading as build, a single build, exactly as InBuild does, and returns
+// the builds of among for which every read made inside it answered as it did for build. It is a promise of soundness:
+// for a build it returns, the same work under InBuild of that build makes the same reads and gets the same answers, so
+// what work computed for build is that build's too. A build it leaves out may agree all the same, since a read whose
+// agreeing builds are costly to tell keeps fewer than agree (a type set that differs by build keeps only the builds
+// whose set is already kept). build itself is always kept when it is in among.
+//
+// What narrows the agreement is each read that answers by build: an object's type, value and position, a named type's
+// underlying type, type parameters and methods, a method's or a name's presence, an interface's type set and a
+// package's imports, each to the builds that share the answer given. An InBuild of the same build inside work gathers
+// into it, and one of another build leaves it build alone, as Carry does, since another goroutine's reads aren't
+// gathered. An Agreeing inside work returns its own builds and narrows this one by them, or to build alone when it
+// reads as another build. Reads inside Outside answer by no build and narrow nothing. Under a plain InBuild, Agreeing
+// leaves the InBuild as it is.
+func Agreeing(build Mask, among Mask, work func()) Mask {
+	if buildCount(build) != 1 {
+		panic("types.Agreeing: build must be a single build")
+	}
+	agreeing := ^Mask(0)
+	state := &variationalState{all: build, mask: build, depth: 1, inBuild: true, agreeing: &agreeing}
+	state.register()
+	// The agreement around this one is narrowed however work ends: by nothing more than its own build when work
+	// panics, since a caller that recovers the panic reads on from an answer this one never gave.
+	finished := false
+	defer func() {
+		state.unregister()
+		if around := state.outer; around != nil && around.agreeing != nil {
+			if finished && around.mask == build {
+				*around.agreeing &= agreeing
+			} else {
+				*around.agreeing &= around.mask
+			}
+		}
+	}()
+	work()
+	// A build agrees with itself, whatever NoteAgreement was told.
+	agreeing = (agreeing | build) & among
+	finished = true
+	return agreeing
+}
+
+// NoteAgreement narrows the agreement being gathered on the calling goroutine (Agreeing) to builds. It is for a caller
+// that reuses, inside work, an answer it computed earlier under Agreeing and kept with the builds it held for: the
+// reads that answer made are not made again, so the builds they would have left are given instead. It narrows the
+// innermost Agreeing running on the goroutine, through an InBuild or an Outside inside it, and does nothing when no
+// Agreeing is running on the goroutine.
+func NoteAgreement(builds Mask) {
+	for state := runningState(); state != nil; state = state.outer {
+		if state.agreeing != nil {
+			*state.agreeing &= builds
+			return
+		}
+	}
 }
 
 // Carry takes the build the calling goroutine reads as under InBuild to work, which another goroutine runs: it returns
@@ -516,6 +640,11 @@ func Carry(work func()) func() {
 	state := runningState()
 	if state == nil || !state.inBuild {
 		return work
+	}
+	// An agreement being gathered (Agreeing) gathers none of the other goroutine's reads, so it is left its build
+	// alone.
+	if state.agreeing != nil {
+		*state.agreeing &= state.mask
 	}
 	build := state.mask
 	return func() { InBuild(build, work) }
@@ -577,7 +706,23 @@ func (n *Named) methodsInBuild() ([]int, bool) {
 	if !orders.differs {
 		return nil, false
 	}
-	return orders.orders[bits.TrailingZeros8(uint8(state.mask))], true
+	build := bits.TrailingZeros8(uint8(state.mask))
+	// An agreement being gathered (Agreeing) keeps the builds that have the same methods in the same order.
+	if state.agreeing != nil {
+		*state.agreeing &= orders.ordering(build)
+	}
+	return orders.orders[build], true
+}
+
+// ordering is the builds whose methods are build's in build's order.
+func (orders *buildMethodOrders) ordering(build int) Mask {
+	var builds Mask
+	for other := range orders.orders {
+		if slices.Equal(orders.orders[other], orders.orders[build]) {
+			builds |= 1 << other
+		}
+	}
+	return builds
 }
 
 // methodOrdersByBuild is n's methods in each build, as methodsInBuild reads them.
@@ -789,10 +934,26 @@ type maskedPos struct {
 // and in a check.
 func positionHere(variation *objectVariation, pos token.Pos) token.Pos {
 	if state := viewState(); state != nil {
-		for _, each := range variation.positions {
-			if each.builds&state.mask != 0 {
-				return each.pos
+		here := positionIn(variation, pos, state.mask)
+		// An agreement being gathered (Agreeing) keeps the builds that declare the object at the same place.
+		if state.agreeing != nil {
+			for build := Mask(1); build != 0; build <<= 1 {
+				if *state.agreeing&build != 0 && positionIn(variation, pos, build) != here {
+					*state.agreeing &^= build
+				}
 			}
+		}
+		return here
+	}
+	return pos
+}
+
+// positionIn is where an object with variation is declared in build: build's own declaration when another build's
+// comes first, and else pos, its first.
+func positionIn(variation *objectVariation, pos token.Pos, build Mask) token.Pos {
+	for _, each := range variation.positions {
+		if each.builds&build != 0 {
+			return each.pos
 		}
 	}
 	return pos
@@ -1176,11 +1337,22 @@ func pickObjectVariant(variation *objectVariation) (objectVariant, bool) {
 		first = index
 	}
 	if first < 0 {
+		// No answer holds in the builds, so the first stands in for them: an agreement being gathered (Agreeing) keeps
+		// the builds no answer holds in, which read the same.
+		if state.agreeing != nil {
+			for _, variant := range variation.variants {
+				*state.agreeing &^= variant.mask
+			}
+		}
 		return variation.variants[0], true
 	}
 	if variation.variants[first].mask&mask != mask {
 		// The answer holds in some of the unit's builds and the object is absent in the rest.
 		splitAt(state, answeringParts(variation.variants, mask))
+	}
+	// An agreement being gathered (Agreeing) keeps the builds the answer holds in.
+	if state.agreeing != nil {
+		*state.agreeing &= variation.variants[first].mask
 	}
 	return variation.variants[first], true
 }
@@ -1208,10 +1380,18 @@ func presentHere(variation *objectVariation) bool {
 		return true
 	}
 	mask := state.mask
+	// An agreement being gathered (Agreeing) keeps the builds the object exists in when it is found, and the builds it
+	// doesn't when it isn't.
 	switch {
 	case mask&variation.presence == mask:
+		if state.agreeing != nil {
+			*state.agreeing &= variation.presence
+		}
 		return true
 	case mask&variation.presence == 0:
+		if state.agreeing != nil {
+			*state.agreeing &^= variation.presence
+		}
 		return false
 	default:
 		splitAt(state, []Mask{mask & variation.presence, mask &^ variation.presence})
@@ -1253,7 +1433,18 @@ func (n *Named) pickVariant() (*namedVariant, *variationalState) {
 		first = index
 	}
 	if first < 0 {
-		first = 0
+		// No underlying type holds in the builds, so the first stands in for them: an agreement being gathered
+		// (Agreeing) keeps the builds none holds in, which read the same.
+		if state.agreeing != nil {
+			for index := range variation.variants {
+				*state.agreeing &^= variation.variants[index].mask
+			}
+		}
+		return &variation.variants[0], state
+	}
+	// An agreement being gathered (Agreeing) keeps the builds the underlying type holds in.
+	if state.agreeing != nil {
+		*state.agreeing &= variation.variants[first].mask
 	}
 	return &variation.variants[first], state
 }
