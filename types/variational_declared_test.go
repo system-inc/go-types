@@ -12,8 +12,9 @@ import (
 
 // declaredFiles declare a function and a method in each build's own file with types identical in every build and
 // each file's own names for the receiver, the parameter and the result, as os declares Remove in file_unix.go and in
-// file_windows.go. A shared file calls each, and nothing it reads differs by build. Only is darwin's and linux's
-// alone, each its own, so windows declares it nowhere.
+// file_windows.go. A shared file calls each, and nothing it reads differs by build. Reset's receiver is a value on
+// darwin and linux and a pointer on windows, which the signatures' types don't tell apart. Only is darwin's and
+// linux's alone, each its own, so windows declares it nowhere.
 var declaredFiles = []fixtureFile{
 	{"shared.go", everyBuild, `package fork
 
@@ -31,6 +32,8 @@ func Remove(name string) (failure error) {
 }
 
 func (w W) Size(unix string) (size int) { return len(unix) }
+
+func (w W) Reset() {}
 `},
 	{"declared_windows.go", buildWindows, `package fork
 
@@ -40,6 +43,8 @@ func Remove(path string) (problem error) {
 }
 
 func (receiver W) Size(windows string) (length int) { return len(windows) }
+
+func (receiver *W) Reset() {}
 `},
 	{"only_darwin.go", buildDarwin, "package fork\n\nfunc Only(first int) int { return first }\n"},
 	{"only_linux.go", buildLinux, "package fork\n\nfunc Only(second int) int { return second }\n"},
@@ -118,8 +123,8 @@ func spellDeclared(fileSet *token.FileSet, signature *types.Signature) string {
 // and Signature are one signature, whose receiver, parameters and results are the build's own declaration's, by name
 // and by place, as the build's plain check has them, and they are the very objects the build's Defs declare at those
 // names and its Uses name in the body. A generic type's instance has its method's signature of the build too, with
-// the type argument in the type parameter's place. Under Agreeing the builds left are those the one declaration is
-// compiled in.
+// the type argument in the type parameter's place, and a type's method set holds the methods whose receiver, as the
+// build declares it, is no pointer. Under Agreeing the builds left are those the one declaration is compiled in.
 func TestVariationalDeclaredSignaturesReadAsEachBuildDeclares(test *testing.T) {
 	test.Parallel()
 	method := func(typeName string, name string) func(checked *types.Package) *types.Func {
@@ -208,6 +213,31 @@ func requireDeclaredSignatures(test *testing.T, fixtures []fixtureFile,
 							want)
 					}
 					requireDeclaredBy(test, fmt.Sprintf("%s %s", name, view), fileSet, signature, defs, uses)
+				})
+			}
+			// The method sets, which tell a value receiver from a pointer where the signatures' types don't.
+			for _, name := range checked.Scope().Names() {
+				spell := func(checked *types.Package) string {
+					typeName, isTypeName := checked.Scope().Lookup(name).(*types.TypeName)
+					if !isTypeName {
+						return ""
+					}
+					named, isNamed := typeName.Type().(*types.Named)
+					if !isNamed {
+						return ""
+					}
+					spelled := spellMethodSet(named) + ", pointer's " + spellMethodSet(types.NewPointer(named))
+					for index := range named.NumMethods() {
+						spelled += ", " + named.Method(index).FullName()
+					}
+					return spelled
+				}
+				want := spell(plain)
+				read(func() {
+					if got := spell(checked); got != want {
+						test.Errorf("%s %s: its method sets and methods are\n\t%s\nand the build's plain check's\n\t%s", name, view,
+							got, want)
+					}
 				})
 			}
 			for name, function := range instances {
@@ -448,5 +478,117 @@ func TestVariationalAUnitCallingADeclaredAgainFunctionRunsOnce(test *testing.T) 
 				variation.Units, variation.Restarts)
 		}
 		test.Logf("the user of the package %s: units %d, restarts %d", label, variation.Units, variation.Restarts)
+	}
+}
+
+// declaredTypesUserFiles are a package that names declaredFiles' function and methods from another package every
+// way an expression's type can hold their signatures: the function itself, a method value, a method expression, and
+// a call.
+var declaredTypesUserFiles = []fixtureFile{
+	{"user.go", everyBuild, `package user
+
+import "fork"
+
+var Held = fork.Remove
+
+func Value(w fork.W) func(string) int { return w.Size }
+
+var Expression = fork.W.Size
+
+func Call() error { return fork.Remove("x") }
+`},
+}
+
+// TestVariationalACallersTypesHoldEachBuildsOwnSignature checks a package that names, from units that never split, a
+// function and a method declared again by build with one type, and requires each build's projection of its Types to
+// hold that build's own declaration's objects where the plain check's does: the function's very signature for the
+// name of the function, and for a method value and a method expression the method's own parameter and result. The
+// plain map, the host's, holds the host's.
+func TestVariationalACallersTypesHoldEachBuildsOwnSignature(test *testing.T) {
+	test.Parallel()
+	fileSet := token.NewFileSet()
+	checked := checkAgreeingFixture(test, fileSet, declaredFiles)
+	user := parseFixture(test, fileSet, declaredTypesUserFiles)
+	variation := &types.Variation{Builds: everyBuild, Files: user.masks}
+	info := fullInfo()
+	if _, userError := (&types.Config{Variation: variation, Importer: packageImporter{"fork": checked}}).Check("user",
+		fileSet, user.files, info); userError != nil {
+		test.Fatal(userError)
+	}
+	if variation.Restarts != 0 {
+		test.Errorf("the user's check restarted %d units of %d, want none", variation.Restarts, variation.Units)
+	}
+	remove := checked.Scope().Lookup("Remove").(*types.Func)
+	size := methodOf(checked, "W", "Size")
+	for index, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
+		projected := info.Types
+		if index > 0 {
+			projected = project(info.Types, variation.Overlays[index].Types)
+		}
+		var removeSignature, sizeSignature *types.Signature
+		types.InBuild(build, func() { removeSignature, sizeSignature = remove.Signature(), size.Signature() })
+		met := map[string]bool{}
+		for expression, answer := range projected {
+			spelled := types.ExprString(expression)
+			met[spelled] = true
+			signature, _ := answer.Type.(*types.Signature)
+			switch spelled {
+			case "fork.Remove":
+				if signature != removeSignature {
+					test.Errorf("build %03b: the type of fork.Remove names its parameter %s, and the build's own signature %s",
+						build, signature.Params().At(0).Name(), removeSignature.Params().At(0).Name())
+				}
+			case "w.Size":
+				if signature.Params().At(0) != sizeSignature.Params().At(0) ||
+					signature.Results().At(0) != sizeSignature.Results().At(0) {
+					test.Errorf("build %03b: the type of w.Size is %s, and the build's own method's is %s", build, signature,
+						sizeSignature)
+				}
+			case "fork.W.Size":
+				if signature.Params().Len() != 2 || signature.Params().At(1) != sizeSignature.Params().At(0) ||
+					signature.Results().At(0) != sizeSignature.Results().At(0) ||
+					signature.Params().At(0).Name() != sizeSignature.Recv().Name() ||
+					signature.Params().At(0).Pos() != sizeSignature.Recv().Pos() {
+					test.Errorf("build %03b: the type of fork.W.Size is %s, and the build's own method's is %s of %s", build,
+						signature, sizeSignature, sizeSignature.Recv().Name())
+				}
+			}
+		}
+		for _, spelled := range []string{"fork.Remove", "w.Size", "fork.W.Size"} {
+			if !met[spelled] {
+				test.Errorf("build %03b: no Types entry for %s", build, spelled)
+			}
+		}
+	}
+}
+
+// receiverFiles declare a method with one type in every build and a value receiver on darwin and linux, a pointer
+// receiver on windows. A shared file needs the method in the type's own method set twice, assigning a value to an
+// interface and calling the method on a value that has no address: both are right on darwin and linux, and on
+// windows each is an error its plain check reports.
+var receiverFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+type W struct{}
+
+type Resetter interface{ Reset() }
+
+var Held Resetter = W{}
+
+func Call() { W{}.Reset() }
+`},
+	{"receiver_unix.go", buildDarwin | buildLinux, "package fork\n\nfunc (w W) Reset() {}\n"},
+	{"receiver_windows.go", buildWindows, "package fork\n\nfunc (receiver *W) Reset() {}\n"},
+}
+
+// TestVariationalAUnitReadsEachBuildsOwnReceiver is the projection test over receiverFiles with diagnostics: a unit
+// that needs a method in a type's method set answers for each build by that build's own receiver, so windows's two
+// errors are reported, for windows alone.
+func TestVariationalAUnitReadsEachBuildsOwnReceiver(test *testing.T) {
+	test.Parallel()
+	_, published := projectAndCompareWithDiagnostics(test, receiverFiles, true)
+	if len(published) != 2 {
+		test.Errorf("the variational check reported %d errors, %v, and windows's plain check reports two", len(published),
+			published)
 	}
 }
