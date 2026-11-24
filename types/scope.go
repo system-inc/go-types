@@ -90,6 +90,10 @@ func (s *Scope) Names() []string {
 func (s *Scope) NumChildren() int { return len(s.childrenHere()) }
 
 // Child returns the i'th child scope for 0 <= i < NumChildren().
+//
+// cohere's variational spike: after a variational check the children are in the order they are written in, by where
+// their nodes start, and the package scope's, the file scopes, in the order the checker was given the files. A plain
+// check has them in the order it checks its declarations in, which is another order (variational_scopes.go).
 func (s *Scope) Child(i int) *Scope { return s.childrenHere()[i] }
 
 // Lookup returns the object in scope s with the given name if such an

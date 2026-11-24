@@ -7,10 +7,18 @@
 // first scope keeps the scopes its body ran again in beside it, and each scope that isn't every build's knows its
 // builds. A read as one build (InBuild, or the host's with no state) then answers a scope's children, a function's
 // scope and an object's parent as that build's own. During the check nothing here is set, and nothing answers by it.
+//
+// The order of a scope's children is the fork's own, and one for every build: the order they are written in, by
+// where their nodes start, and for the package's scope the order the checker was given the files (orderChildren). A
+// plain check has them in the order it happens to check its declarations in, types before functions and a method
+// when it is first selected, which one check of every build can't make for each of them, so no order by build is
+// kept through the check. The children a build has are the same scopes its plain check has, in this order.
 
 package types
 
 import (
+	"cmp"
+	"go/token"
 	"math/bits"
 	"slices"
 )
@@ -74,8 +82,9 @@ func (s *Scope) here() *Scope {
 	return s
 }
 
-// childrenHere are s's children as a read as one build has them: the build's own, in the order their runs made
-// them. An agreement being gathered (Agreeing) keeps the builds that have the same children.
+// childrenHere are s's children as a read as one build has them: the build's own, in the order they are written in,
+// which the settle put them in (orderChildren). An agreement being gathered (Agreeing) keeps the builds that have
+// the same children.
 func (s *Scope) childrenHere() []*Scope {
 	if s.byBuild == nil || s.byBuild.children == nil {
 		return s.children
@@ -125,17 +134,80 @@ func (logs *infoLogs) noteRerun(first *Scope, rerun *Scope) {
 	reruns.scopes = append(reruns.scopes, rerun)
 }
 
+// orderChildren puts parent's children in the order they are written in, by where the node the Scopes log names
+// each for starts (positions), whatever order the check made them in. The package's scope keeps its children, the
+// file scopes, in the order the checker was given the files: a position orders what lies in one file, as every
+// other scope's children do, and across files it follows the order the files joined the file set in. Children at
+// one position, a node's scopes in different builds, keep the order they were made in, a function's first scope
+// that stands for its reruns is where they are, and a child the log names nowhere keeps its place.
+func orderChildren(parent *Scope, positions map[*Scope]token.Pos) {
+	if parent.parent == Universe {
+		return
+	}
+	positionOf := func(child *Scope) (token.Pos, bool) {
+		if position, named := positions[child]; named {
+			return position, true
+		}
+		// No answer names a first scope whose body ran again for every group of its builds, and each rerun the scope
+		// keeps is named for its node.
+		if child.byBuild != nil && len(child.byBuild.reruns) > 0 {
+			position, named := positions[child.byBuild.reruns[0].scope]
+			return position, named
+		}
+		return token.NoPos, false
+	}
+	// Nearly every scope's children were made in the order they are written in, which one pass finds.
+	ordered := true
+	last := token.NoPos
+	for _, child := range parent.children {
+		if position, named := positionOf(child); named {
+			if position < last {
+				ordered = false
+				break
+			}
+			last = position
+		}
+	}
+	if ordered {
+		return
+	}
+	type placedChild struct {
+		position token.Pos
+		scope    *Scope
+	}
+	// The children the log names are ordered among the slots they hold, so one it doesn't name stays where it is.
+	placed := make([]placedChild, 0, len(parent.children))
+	slots := make([]int, 0, len(parent.children))
+	for index, child := range parent.children {
+		if position, named := positionOf(child); named {
+			placed = append(placed, placedChild{position, child})
+			slots = append(slots, index)
+		}
+	}
+	slices.SortStableFunc(placed, func(left placedChild, right placedChild) int {
+		return cmp.Compare(left.position, right.position)
+	})
+	for index, slot := range slots {
+		parent.children[slot] = placed[index].scope
+	}
+}
+
 // settleScopes settles the checked package's scope tree from the Scopes log, of a check of all's builds, as this
 // file's comment has it.
 func (logs *infoLogs) settleScopes(all Mask) {
 	builds := map[*Scope]Mask{}
-	for _, scope := range logs.scopes.plain {
+	// positions is where the node the log names each scope for starts. Nearly every node has one scope.
+	positions := make(map[*Scope]token.Pos, len(logs.scopes.plain)+len(logs.scopes.staged))
+	for node, scope := range logs.scopes.plain {
 		builds[scope] |= all
+		positions[scope] = node.Pos()
 	}
-	for _, answers := range logs.scopes.staged {
+	for node, answers := range logs.scopes.staged {
 		builds[answers.first.value] |= answers.first.builds
+		positions[answers.first.value] = node.Pos()
 		for _, answer := range answers.more {
 			builds[answer.value] |= answer.builds
+			positions[answer.value] = node.Pos()
 		}
 	}
 	settled := map[*Scope]bool{}
@@ -180,6 +252,7 @@ func (logs *infoLogs) settleScopes(all Mask) {
 			whole = false
 			return child.byBuild.builds == 0 && len(child.byBuild.reruns) == 0
 		})
+		orderChildren(parent, positions)
 		for index, child := range parent.children {
 			// A rerun keeps the number of the first scope it stands in for, as bodyScope gave it.
 			child.number = index + 1

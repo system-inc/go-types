@@ -177,6 +177,148 @@ func TestVariationalScopeTreeIsEachBuildsOwn(test *testing.T) {
 	}
 }
 
+// scopeOrderFiles declare a type's methods in each build's own file, in the opposite order on windows, with a
+// function among them there: a method declared again by build is one object, so its scopes are made when its
+// first declaration is checked, and the variational check makes one file's function scopes in the other file's
+// order, which isn't the order they are written in. The shared file declares a generic type last, whose scope any
+// check makes before a function's, and before it Scaled, whose body runs again for each group of builds since Scale
+// is each group's own, so its first scope stands for its reruns among them.
+var scopeOrderFiles = []fixtureFile{
+	{"shared.go", everyBuild, `package fork
+
+type Gauge int
+
+func Read(gauge Gauge) int { return gauge.Low() + gauge.Middle() + gauge.High() }
+
+func Scaled() int {
+	scaled := Scale * 2
+	return scaled
+}
+
+type Pair[Element any] struct{ left, right Element }
+`},
+	{"gauge_unix.go", buildLinux | buildDarwin, `package fork
+
+const Scale = 1
+
+func (Gauge) Low() int { return 0 }
+
+func (Gauge) Middle() int { return 1 }
+
+func (Gauge) High() int { return 2 }
+`},
+	{"gauge_windows.go", buildWindows, `package fork
+
+const Scale = 2
+
+func (Gauge) High() int { return 2 }
+
+func Between() int { return 3 }
+
+func (Gauge) Middle() int { return 1 }
+
+func (Gauge) Low() int { return 0 }
+`},
+}
+
+// TestVariationalScopeChildrenAreInPositionOrder checks scopeOrderFiles once for every build, its files given to the
+// checker last first, which isn't the order they joined the file set in, and holds the scope tree, read under InBuild
+// for each build and with no state as the host, to its order: below the package's scope, a scope's children are in
+// the order of the nodes the build's Scopes names them for, whatever order the check made them in, and the package
+// scope's children, the file scopes, are in the order the checker was given the files.
+func TestVariationalScopeChildrenAreInPositionOrder(test *testing.T) {
+	test.Parallel()
+	fileSet := token.NewFileSet()
+	parsed := parseFixture(test, fileSet, scopeOrderFiles)
+	given := slices.Clone(parsed.files)
+	slices.Reverse(given)
+	variation := &types.Variation{Builds: everyBuild, Files: parsed.masks}
+	info := fullInfo()
+	checked, checkError := (&types.Config{Variation: variation, Importer: fixtureImporter{}}).Check("fork", fileSet,
+		given, info)
+	if checkError != nil {
+		test.Fatal(checkError)
+	}
+	// Each build's file of methods holds this many functions, the most siblings the fixture has.
+	functions := map[types.Mask]int{buildDarwin: 3, buildLinux: 3, buildWindows: 4}
+	// Scaled's body must run again for each group of builds, so that its first scope stands for its reruns among
+	// its siblings.
+	scaled := checked.Scope().Lookup("Scaled").(*types.Func)
+	scaledScopes := map[types.Mask]*types.Scope{}
+	for _, build := range []types.Mask{buildDarwin, buildWindows} {
+		types.InBuild(build, func() { scaledScopes[build] = scaled.Scope() })
+	}
+	if scaledScopes[buildDarwin] == scaledScopes[buildWindows] {
+		test.Errorf("Scaled has one scope on darwin and windows, and the fixture needs its body to run again for each")
+	}
+	for index, build := range []types.Mask{buildDarwin, buildLinux, buildWindows} {
+		overlays := types.BuildOverlays{}
+		if index > 0 {
+			overlays = variation.Overlays[index]
+		}
+		scopes := project(info.Scopes, overlays.Scopes)
+		nodes := make(map[*types.Scope]ast.Node, len(scopes))
+		for node, scope := range scopes {
+			nodes[scope] = node
+		}
+		var givenScopes []*types.Scope
+		for _, file := range given {
+			if parsed.masks[file]&build != 0 {
+				givenScopes = append(givenScopes, scopes[file])
+			}
+		}
+		views := map[string]func(work func()){
+			fmt.Sprintf("under InBuild %03b", build): func(work func()) { types.InBuild(build, work) },
+		}
+		if build == buildDarwin {
+			views["with no state, as the host"] = func(work func()) { work() }
+		}
+		for _, view := range slices.Sorted(maps.Keys(views)) {
+			views[view](func() {
+				fileScopes := slices.Collect(checked.Scope().Children())
+				if !slices.Equal(fileScopes, givenScopes) {
+					spell := func(scopes []*types.Scope) string {
+						var places []string
+						for _, scope := range scopes {
+							places = append(places, fileSet.Position(scope.Pos()).Filename)
+						}
+						return strings.Join(places, ", ")
+					}
+					test.Errorf("%s: the package scope's children are the scopes of %s, and the checker was given %s", view,
+						spell(fileScopes), spell(givenScopes))
+				}
+				most := 0
+				var requireOrdered func(scope *types.Scope)
+				requireOrdered = func(scope *types.Scope) {
+					most = max(most, scope.NumChildren())
+					var before ast.Node
+					for child := range scope.Children() {
+						node := nodes[child]
+						if node == nil {
+							test.Errorf("%s: the scope at %s is a child, and the build's Scopes doesn't name it", view,
+								spellScopePlace(fileSet, child))
+							continue
+						}
+						if before != nil && node.Pos() < before.Pos() {
+							test.Errorf("%s: among their parent's children, the scope of the node at %s comes after that of the node at %s",
+								view, fileSet.Position(node.Pos()), fileSet.Position(before.Pos()))
+						}
+						before = node
+						requireOrdered(child)
+					}
+				}
+				for _, fileScope := range fileScopes {
+					requireOrdered(fileScope)
+				}
+				if most != functions[build] {
+					test.Errorf("%s: the most children a scope has is %d, and the build's file of methods declares %d functions",
+						view, most, functions[build])
+				}
+			})
+		}
+	}
+}
+
 // TestVariationalAgreeingNarrowsAtEachScopeReadThatDiffers reads the scope tree of the spike fixture, whose F's body
 // runs once for each build, since N is each build's own, and whose files are each build's own: the package scope's
 // children, F's scope and the scope Innermost finds in F leave the builds that share the answer, and a function whose

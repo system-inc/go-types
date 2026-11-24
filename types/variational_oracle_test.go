@@ -22,6 +22,17 @@ import (
 // as the build, against the same accessor of the plain check's own object. An accessor is found by reflection, so
 // one added later is compared without anyone listing it; the few that take an argument are listed (unreflected,
 // asked).
+//
+// A scope's children are the one answer compared otherwise (children). The package scope's, the file scopes, are
+// compared place by place like any list: they are in the order the checker was given the files, in both checks, and
+// a reader binds to it. Below the package's scope the children are compared as a set, each matched to the plain
+// check's by the node its Scopes names it for, since the two checks make their scopes in different orders: a plain
+// check in the order it happens to check its declarations in, which is held to nothing, and a variational check in
+// the order of one run over every build. The variational check's are then held to the order they are written in, the
+// order of their nodes' positions, which is what the fork gives a reader. Compared place by place they differed in
+// two constructs, both read as windows: a method declared again in each build's own file (methods), whose scopes are
+// made in the order of the first file that declares it, and a method on an alias whose target is another type on
+// windows (alias targets), whose windows scope is made after the scopes of the declarations written after it.
 
 // oracleDenied are the accessors reflection finds and the oracle doesn't call, each with why.
 var oracleDenied = map[string]string{
@@ -50,6 +61,10 @@ type accessorOracle struct {
 	// asking, while an accessor that takes an argument is compared (asked), is its name: whatever disagrees in what
 	// it answers, or in anything reached from that, is that one accessor's disagreement.
 	asking string
+	// gotNodes and wantNodes are the node each side's Scopes names each of its scopes for, which a scope's children
+	// are matched by (children).
+	gotNodes  map[*types.Scope]ast.Node
+	wantNodes map[*types.Scope]ast.Node
 }
 
 // oraclePair is the value of the other side a value was first met beside, and where.
@@ -311,6 +326,14 @@ func (oracle *accessorOracle) accessors(path string, got reflect.Value, want ref
 		if method.Type.NumIn() != 1 || method.Type.NumOut() == 0 || oracleDenied[leaf] != "" {
 			continue
 		}
+		// The children of a scope below the package's are compared as a set, and held to their order apart.
+		if leaf == "*types.Scope.Children" {
+			gotScope, wantScope := got.Interface().(*types.Scope), want.Interface().(*types.Scope)
+			if gotScope.Parent() != types.Universe {
+				oracle.children(path+".Children()", gotScope, wantScope)
+				continue
+			}
+		}
 		gotResults, gotPanic := callAccessor(got.Method(index))
 		wantResults, wantPanic := callAccessor(want.Method(index))
 		if gotPanic != nil || wantPanic != nil {
@@ -322,6 +345,53 @@ func (oracle *accessorOracle) accessors(path string, got reflect.Value, want ref
 		for result := range gotResults {
 			oracle.compare(path+"."+method.Name+"()", leaf, gotResults[result], wantResults[result])
 		}
+	}
+}
+
+// children compares the children of got and want, a scope below the package's in each check, as a set: each child
+// is matched to the other side's by the node its own side's Scopes names it for, never by its place among them, and
+// the two are then compared like any answer. Apart from that it holds got's, the variational check's, to the order of
+// their nodes' positions. A plain check's own order is held to nothing.
+func (oracle *accessorOracle) children(path string, got *types.Scope, want *types.Scope) {
+	const leaf = "*types.Scope.Children"
+	// byNode is scope's children by their nodes. spell puts what is wrong with one of them on its own side of a
+	// disagreement, and the other side's children are spelled as sound.
+	byNode := func(scope *types.Scope, nodes map[*types.Scope]ast.Node, isGot bool) map[string]*types.Scope {
+		spell := func(wrong string) (string, string) {
+			if isGot {
+				return wrong, "children its Scopes names, one of a node"
+			}
+			return "children its Scopes names, one of a node", wrong
+		}
+		children := map[string]*types.Scope{}
+		var before ast.Node
+		for child := range scope.Children() {
+			node := nodes[child]
+			if node == nil {
+				gotSpelled, wantSpelled := spell("a child at " + oracle.place(child.Pos()) + " its Scopes doesn't name")
+				oracle.fail(leaf+": a child the check's Scopes doesn't name", path, gotSpelled, wantSpelled)
+				continue
+			}
+			key := nodeKey(oracle.fileSet, node)
+			if children[key] != nil {
+				gotSpelled, wantSpelled := spell("two children of the node at " + key)
+				oracle.fail(leaf+": two children of one node", path, gotSpelled, wantSpelled)
+			}
+			children[key] = child
+			if isGot && before != nil && node.Pos() < before.Pos() {
+				oracle.fail(leaf+": out of position order", path,
+					"the child of "+key+" after the child of "+nodeKey(oracle.fileSet, before),
+					"in an order of its own, which is held to nothing")
+			}
+			before = node
+		}
+		return children
+	}
+	gotChildren, wantChildren := byNode(got, oracle.gotNodes, true), byNode(want, oracle.wantNodes, false)
+	keys := slices.Concat(slices.Collect(maps.Keys(gotChildren)), slices.Collect(maps.Keys(wantChildren)))
+	slices.Sort(keys)
+	for _, key := range slices.Compact(keys) {
+		oracle.compare(path+"["+key+"]", leaf, reflect.ValueOf(gotChildren[key]), reflect.ValueOf(wantChildren[key]))
 	}
 }
 
@@ -416,6 +486,14 @@ type oracleSide struct {
 func (oracle *accessorOracle) compareSides(got oracleSide, want oracleSide) {
 	nodeKeyOf := func(node ast.Node) string { return nodeKey(oracle.fileSet, node) }
 	identKeyOf := func(ident *ast.Ident) string { return nodeKeyOf(ident) }
+	oracle.gotNodes = make(map[*types.Scope]ast.Node, len(got.info.Scopes))
+	for node, scope := range got.info.Scopes {
+		oracle.gotNodes[scope] = node
+	}
+	oracle.wantNodes = make(map[*types.Scope]ast.Node, len(want.info.Scopes))
+	for node, scope := range want.info.Scopes {
+		oracle.wantNodes[scope] = node
+	}
 	seedRoots(oracle, "Scopes", got.info.Scopes, want.info.Scopes, nodeKeyOf)
 	seedRoots(oracle, "Defs", got.info.Defs, want.info.Defs, identKeyOf)
 	seedRoots(oracle, "Implicits", got.info.Implicits, want.info.Implicits, nodeKeyOf)
