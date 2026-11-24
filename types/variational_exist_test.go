@@ -69,3 +69,59 @@ func plainMethod(test *testing.T, build Mask) string {
 	embedding := checked.Scope().Lookup("I").Type().Underlying().(*Interface)
 	return TypeString(embedding.Method(0).Type(), nil)
 }
+
+// importedGenericInterfaceSource is a package whose interface Compact embeds an instance of the generic interface
+// Graph, so Compact's method Out is the instance's.
+const importedGenericInterfaceSource = "package q\n\ntype Graph[Node comparable] interface{ Out(node Node) Node }\n\n" +
+	"type Compact interface{ Graph[int] }\n"
+
+// TestVariationalAnImportedGenericInterfacesInstanceKeepsItsMethodsOnTheInstance makes Graph and Compact as an export
+// data reader does, with no checker: Graph a named type whose interface's method has Graph itself for its receiver,
+// and Compact an interface embedding Graph[int], instantiated with no checker. The substitution completes the
+// instance's interface before the expansion gives its methods the instance for their receiver (golang/go#61561), and
+// the type set it kept by build then outlived the methods it was computed from, so in a process where anything
+// differs by build Compact's Out had the generic Graph for its receiver, and a plain check's has Graph[int]. The flag
+// is process-wide, so the test runs as TestVariationalAnImportedUnderlyingTypeAloneReadsTypeSetsByBuild does, with it
+// cleared and then set, and put back when it ends.
+func TestVariationalAnImportedGenericInterfacesInstanceKeepsItsMethodsOnTheInstance(test *testing.T) {
+	saved := variationsExist.Load()
+	test.Cleanup(func() { variationsExist.Store(saved) })
+
+	fileSet := token.NewFileSet()
+	file, parseError := parser.ParseFile(fileSet, "q.go", importedGenericInterfaceSource, 0)
+	if parseError != nil {
+		test.Fatal(parseError)
+	}
+	checked, checkError := (&Config{}).Check("example.com/q", fileSet, []*ast.File{file}, nil)
+	if checkError != nil {
+		test.Fatal(checkError)
+	}
+	spell := func(embedding *Interface) string {
+		method := embedding.Method(0)
+		return method.Name() + " of " + TypeString(method.Signature().Recv().Type(), nil)
+	}
+	plain := spell(checked.Scope().Lookup("Compact").Type().Underlying().(*Interface))
+
+	for _, exist := range []bool{false, true} {
+		variationsExist.Store(exist)
+		importedPackage := NewPackage("example.com/q", "q")
+		generic := NewNamed(NewTypeName(token.NoPos, importedPackage, "Graph", nil), nil, nil)
+		node := NewTypeParam(NewTypeName(token.NoPos, importedPackage, "Node", nil), Universe.Lookup("comparable").Type())
+		generic.SetTypeParams([]*TypeParam{node})
+		signature := NewSignatureType(NewVar(token.NoPos, importedPackage, "", generic), nil, nil,
+			NewTuple(NewParam(token.NoPos, importedPackage, "node", node)),
+			NewTuple(NewParam(token.NoPos, importedPackage, "", node)), false)
+		generic.SetUnderlying(NewInterfaceType([]*Func{NewFunc(token.NoPos, importedPackage, "Out", signature)}, nil).
+			Complete())
+		instance, instantiateError := Instantiate(nil, generic, []Type{Typ[Int]}, false)
+		if instantiateError != nil {
+			test.Fatal(instantiateError)
+		}
+		embedding := NewInterfaceType(nil, []Type{instance}).Complete()
+		NewNamed(NewTypeName(token.NoPos, importedPackage, "Compact", nil), embedding, nil)
+
+		if read := spell(embedding); read != plain {
+			test.Errorf("Compact's method read with variationsExist %t: %s, a plain check has %s", exist, read, plain)
+		}
+	}
+}

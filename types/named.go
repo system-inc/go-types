@@ -881,6 +881,10 @@ func (n *Named) expandRightSide(declared Type, tpars *TypeParamList) (rhs Type) 
 			}
 			iface.methods = methods
 			iface.tset = nil // recompute type set with new methods
+			// cohere's variational spike: and the type set kept by build, which the substitution's completion of
+			// an interface with no checker computed from the methods just replaced, in a process where anything
+			// differs by build (computeInterfaceTypeSet). The interface is this expansion's own until it returns.
+			iface.byBuild.Store(nil)
 
 			// go.dev/issue/61561: We have to complete the interface even without a checker.
 			if check == nil {
