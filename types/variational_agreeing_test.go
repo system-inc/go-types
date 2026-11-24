@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/constant"
 	"go/token"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -488,6 +489,83 @@ type reachSpelling struct {
 	selectors map[string]bool
 	builder   strings.Builder
 	seen      map[types.Type]bool
+	// disagreements are the accessors met that answered otherwise than the type of their object in the build read as
+	// (function, methodsInSet): an accessor that reads one build's answer for every build agrees with itself across
+	// builds, so comparing builds alone never finds it.
+	disagreements map[string]bool
+}
+
+// disagree notes an accessor that answered otherwise than its object's type in the build read as.
+func (spelling *reachSpelling) disagree(format string, arguments ...any) {
+	spelling.disagreements[fmt.Sprintf(format, arguments...)] = true
+}
+
+// function spells what a function's own accessors answer, its signature, its scope and its full name, and holds
+// each to the function's type in the build read as: Signature is Type, the scope declares that signature's own named
+// parameters and results, and the full name is written with that signature's receiver.
+func (spelling *reachSpelling) function(function *types.Func) {
+	typed, isSignature := function.Type().(*types.Signature)
+	if !isSignature {
+		return
+	}
+	signature := function.Signature()
+	scope := function.Scope()
+	fmt.Fprintf(&spelling.builder, "\n function %s, signature %s, scope %s", function.FullName(),
+		spellSignature(signature), spellScope(spelling.fileSet, scope))
+	if signature != typed {
+		spelling.disagree("%s: Signature is %s, and Type %s", function.Name(), spellSignature(signature),
+			spellSignature(typed))
+	}
+	wantName := function.Name()
+	switch receiver := typed.Recv(); {
+	case receiver == nil && function.Pkg() != nil:
+		wantName = function.Pkg().Path() + "." + wantName
+	case receiver == nil:
+	case types.IsInterface(receiver.Type()) && types.Unalias(receiver.Type()) == receiver.Type().Underlying():
+		wantName = "(interface)." + wantName
+	default:
+		wantName = "(" + types.TypeString(receiver.Type(), nil) + ")." + wantName
+	}
+	if fullName := function.FullName(); fullName != wantName {
+		spelling.disagree("%s: FullName is %s, and its type's receiver gives %s", function.Name(), fullName, wantName)
+	}
+	if scope == nil {
+		return
+	}
+	for _, tuple := range []*types.Tuple{typed.Params(), typed.Results()} {
+		for index := range tuple.Len() {
+			variable := tuple.At(index)
+			if variable.Name() != "" && variable.Name() != "_" && scope.Lookup(variable.Name()) != types.Object(variable) {
+				spelling.disagree("%s: Scope, in %s, doesn't declare %s of its type %s", function.Name(),
+					spellScope(spelling.fileSet, scope), variable.Name(), spellSignature(typed))
+			}
+		}
+	}
+}
+
+// methodsInSet holds a named type's method set to its methods' receivers in the build read as: a method is in the
+// type's own method set exactly when its receiver is no pointer. A method a field of the type's own struct clashes
+// with, which a build's check reports, is in neither set and is left out.
+func (spelling *reachSpelling) methodsInSet(named *types.Named) {
+	methodSet := types.NewMethodSet(named)
+	fields := map[string]bool{}
+	if structure, isStruct := named.Underlying().(*types.Struct); isStruct {
+		for index := range structure.NumFields() {
+			fields[structure.Field(index).Name()] = true
+		}
+	}
+	for index := range named.NumMethods() {
+		method := named.Method(index)
+		signature, isSignature := method.Type().(*types.Signature)
+		if !isSignature || signature.Recv() == nil || method.Name() == "_" || fields[method.Name()] {
+			continue
+		}
+		_, byPointer := types.Unalias(signature.Recv().Type()).(*types.Pointer)
+		if inSet := methodSet.Lookup(method.Pkg(), method.Name()) != nil; inSet == byPointer {
+			spelling.disagree("%s.%s: in its type's method set %t, and its receiver is a pointer %t", named.Obj().Name(),
+				method.Name(), inSet, byPointer)
+		}
+	}
 }
 
 func (spelling *reachSpelling) position(pos token.Pos) string {
@@ -552,9 +630,21 @@ func (spelling *reachSpelling) held(object types.Object) string {
 }
 
 // heldAspects are the reads of one property each of an object the reader holds already: its type, a constant's
-// value, and a type name's underlying type, its methods' names by index, and its interface's methods' names.
+// value, a function's signature, full name and scope, and a type name's underlying type, its methods' names by index,
+// and its interface's methods' names.
 func heldAspects(object types.Object) map[string]func() string {
 	aspects := map[string]func() string{"its type": func() string { return canonical.Spell(object.Type()) }}
+	if function, isFunction := object.(*types.Func); isFunction && function.Type() != nil {
+		aspects["its signature"] = func() string { return spellSignature(function.Signature()) }
+		aspects["its full name"] = function.FullName
+		aspects["its scope"] = func() string {
+			scope := function.Scope()
+			if scope == nil {
+				return "no scope"
+			}
+			return fmt.Sprintf("%d %s", scope.Pos(), strings.Join(scope.Names(), " "))
+		}
+	}
 	if constantObject, isConstant := object.(*types.Const); isConstant {
 		aspects["its value"] = func() string { return constantObject.Val().ExactString() }
 	}
@@ -593,6 +683,9 @@ func (spelling *reachSpelling) object(object types.Object) {
 	if typeName, isTypeName := object.(*types.TypeName); isTypeName {
 		fmt.Fprintf(&spelling.builder, " alias %t", typeName.IsAlias())
 	}
+	if function, isFunction := object.(*types.Func); isFunction {
+		spelling.function(function)
+	}
 	spelling.typed(object.Type())
 }
 
@@ -600,6 +693,7 @@ func (spelling *reachSpelling) method(method *types.Func) {
 	spelling.selectors[method.Name()] = true
 	fmt.Fprintf(&spelling.builder, "\n method %s at %s: %s", method.FullName(), spelling.position(method.Pos()),
 		canonical.Spell(method.Type()))
+	spelling.function(method)
 	spelling.typed(method.Type())
 }
 
@@ -641,6 +735,7 @@ func (spelling *reachSpelling) typed(typed types.Type) {
 		}
 		fmt.Fprintf(&spelling.builder, "\n method set %s, pointer's %s", spellMethodSet(typed),
 			spellMethodSet(types.NewPointer(typed)))
+		spelling.methodsInSet(typed)
 		selectors := make([]string, 0, len(spelling.selectors))
 		for selector := range spelling.selectors {
 			selectors = append(selectors, selector)
@@ -734,7 +829,7 @@ func requireAgreement(test *testing.T, label string, fileSet *token.FileSet, che
 ) {
 	test.Helper()
 	spelling := &reachSpelling{fileSet: fileSet, checked: checked, context: types.NewContext(),
-		selectors: map[string]bool{}}
+		selectors: map[string]bool{}, disagreements: map[string]bool{}}
 	types.Outside(func() { spelling.names = checked.Scope().Names() })
 	builds := []types.Mask{buildDarwin, buildLinux, buildWindows}
 	// Every build's selectors are met before any spelling is compared, so each spelling looks up the same ones.
@@ -818,6 +913,10 @@ func requireAgreement(test *testing.T, label string, fileSet *token.FileSet, che
 			}
 		}
 	}
+	disagreements := slices.Sorted(maps.Keys(spelling.disagreements))
+	for _, disagreement := range disagreements {
+		test.Errorf("%s: %s", label, disagreement)
+	}
 }
 
 // TestVariationalAgreeingBuildsReadAlike is Agreeing's contract, over every projection fixture, agreeingFiles, the
@@ -826,7 +925,7 @@ func requireAgreement(test *testing.T, label string, fileSet *token.FileSet, che
 func TestVariationalAgreeingBuildsReadAlike(test *testing.T) {
 	test.Parallel()
 	tally := &agreementTally{}
-	fixtures := map[string][]fixtureFile{"agreeing": agreeingFiles}
+	fixtures := map[string][]fixtureFile{"agreeing": agreeingFiles, "accessors": accessorFiles}
 	for name, files := range projectionFixtures {
 		fixtures[name] = files
 	}

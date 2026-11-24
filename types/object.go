@@ -445,8 +445,9 @@ func NewFunc(pos token.Pos, pkg *Package, name string, sig *Signature) *Func {
 
 // Signature returns the signature (type) of the function or method.
 func (obj *Func) Signature() *Signature {
-	if obj.typ != nil {
-		return obj.typ.(*Signature) // normal case
+	// cohere's variational spike: a function declared again by build has each build's own signature, as Type has it.
+	if typ := obj.Type(); typ != nil {
+		return typ.(*Signature) // normal case
 	}
 	// No signature: Signature was called either:
 	// - within go/types, before a FuncDecl's initially
@@ -470,7 +471,9 @@ func (obj *Func) FullName() string {
 // Scope returns the scope of the function's body block.
 // The result is nil for imported or instantiated functions and methods
 // (but there is also no mechanism to get to an instantiated function).
-func (obj *Func) Scope() *Scope { return obj.typ.(*Signature).scope }
+//
+// cohere's variational spike: a function declared again by build has the scope of each build's own signature.
+func (obj *Func) Scope() *Scope { return obj.Type().(*Signature).scope }
 
 // Origin returns the canonical Func for its receiver, i.e. the Func object
 // recorded in Info.Defs.
@@ -498,7 +501,8 @@ func (obj *Func) hasPtrRecv() bool {
 	// Caution: Checker.funcDecl (decl.go) marks a function by setting its type to an empty
 	// signature. We may reach here before the signature is fully set up: we must explicitly
 	// check if the receiver is set (we cannot just look for non-nil obj.typ).
-	if sig, _ := obj.typ.(*Signature); sig != nil && sig.recv != nil {
+	// cohere's variational spike: a method declared again by build has each build's own receiver.
+	if sig, _ := obj.Type().(*Signature); sig != nil && sig.recv != nil {
 		_, isPtr := deref(sig.recv.typ)
 		return isPtr
 	}
@@ -678,8 +682,9 @@ func (obj *Builtin) String() string  { return ObjectString(obj, nil) }
 func (obj *Nil) String() string      { return ObjectString(obj, nil) }
 
 func writeFuncName(buf *bytes.Buffer, f *Func, qf Qualifier) {
-	if f.typ != nil {
-		sig := f.typ.(*Signature)
+	// cohere's variational spike: a method declared again by build is named with each build's own receiver.
+	if typ := f.Type(); typ != nil {
+		sig := typ.(*Signature)
 		if recv := sig.Recv(); recv != nil {
 			buf.WriteByte('(')
 			if _, ok := recv.Type().(*Interface); ok {
