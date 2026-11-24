@@ -84,7 +84,8 @@ func (s *Scope) here() *Scope {
 
 // childrenHere are s's children as a read as one build has them: the build's own, in the order they are written in,
 // which the settle put them in (orderChildren). An agreement being gathered (Agreeing) keeps the builds that have
-// the same children.
+// the same children. Every build's list is taken from the one ordered list, so the lists share one order, and two
+// builds with the same children have equal lists.
 func (s *Scope) childrenHere() []*Scope {
 	if s.byBuild == nil || s.byBuild.children == nil {
 		return s.children
@@ -156,7 +157,9 @@ func orderChildren(parent *Scope, positions map[*Scope]token.Pos) {
 		}
 		return token.NoPos, false
 	}
-	// Nearly every scope's children were made in the order they are written in, which one pass finds.
+	// Inside a function every scope's children are made in the order they are written in, so nearly every parent
+	// needs no sort, which one pass finds. A file's are the ones made out of it: its types' before its functions',
+	// and a method's when it is first selected.
 	ordered := true
 	last := token.NoPos
 	for _, child := range parent.children {
