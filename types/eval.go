@@ -66,7 +66,9 @@ func CheckExpr(fset *token.FileSet, pkg *Package, pos token.Pos, expr ast.Expr, 
 		// incorrect (files spread across a wide range of fset
 		// positions) - ignore it and just consider its children
 		// (file scopes).
-		for _, fscope := range pkg.scope.children {
+		// cohere's variational spike: read as one build, the file scopes are the build's own, so a position in a
+		// file the build doesn't compile is none of the package's, as in the build's plain check.
+		for _, fscope := range pkg.scope.childrenHere() {
 			if scope = fscope.Innermost(pos); scope != nil {
 				break
 			}
